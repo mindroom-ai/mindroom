@@ -10,9 +10,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from mindroom.constants import subprocess_path_with_prepends
-from mindroom.desktop.shell import DesktopShellOutput
+from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES
 from mindroom.logging_config import get_logger
-from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
+from mindroom.shell.output import SpoolCapture
+from mindroom.shell.runner import run_foreground
 
 logger = get_logger(__name__)
 
@@ -34,30 +35,25 @@ async def capture_login_environment(
     login_shell = shell or account.pw_shell or "/bin/sh"
     base = _base_environment(account)
     sentinel = f"MINDROOM_LOGIN_ENVIRONMENT_{uuid4().hex}"
-    registry: dict[str, ProcessRecord] = {}
     environment = None
     with tempfile.TemporaryDirectory(prefix="mindroom-desktop-environment-") as directory:
-        output = DesktopShellOutput(directory)
+        spool = SpoolCapture(max_bytes=MAX_SHELL_OUTPUT_BYTES, directory=directory)
         try:
-            result = await run_command(
-                registry,
-                namespace="login-environment",
+            result = await run_foreground(
                 argv=[login_shell, "-l", "-i", "-c", f"printf '%s' {sentinel}; exec /usr/bin/env -0"],
                 env=base,
                 cwd=account.pw_dir if Path(account.pw_dir).is_dir() else "/",
                 tail=0,
                 timeout=timeout_seconds,
-                output_capture=output,
+                spool=spool,
                 stdin=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 kill_group_after_exit=True,
             )
-            if result.handle is None and output.completed and output.exit_code == 0 and not output.truncated:
-                environment = _parse_environment(output.read(), sentinel)
+            if not result.timed_out and not spool.incomplete and result.return_code == 0 and not spool.stdout.truncated:
+                environment = _parse_environment(spool.stdout.pread(), sentinel)
         finally:
-            # A login shell still running at the bound became a handle; stop its whole process group.
-            kill_all_records(registry)
-            output.release()
+            spool.close()
     if environment is None:
         logger.warning("desktop_login_environment_fallback", shell=login_shell)
         return base

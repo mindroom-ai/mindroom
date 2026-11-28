@@ -21,7 +21,7 @@ from mindroom.agent_cli.main import main
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.agent_cli.turn import ToolKey
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.shell.output_capture import format_shell_completion
+from mindroom.shell.output import format_shell_completion
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns

@@ -1,27 +1,11 @@
 """Worker-local shell supervisor process for shell commands and background script runs.
 
-The sandbox runner isolates tool calls in per-request subprocesses (spawn or
-forkserver children), which can neither own background script handles, whose
-``check``/``kill`` follow-ups arrive in different processes, nor guarantee that
-a command they started dies with them. This module keeps one small long-lived
-*supervisor* process per runner that owns the command processes and the
-in-memory handle registry, so shell requests get the same subprocess isolation
-as every other execution tool.
-
-Flow:
-
-- The runner spawns ``python -m mindroom.shell.supervisor <socket>`` once and
-  advertises the socket to shell tool subprocesses via
-  ``MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET`` (the ``MINDROOM_SANDBOX_``
-  prefix keeps it out of shell env passthrough).
-- The shell toolkit computes argv, env, and cwd exactly as for local
-  execution, then sends a run request that stops the command at its timeout;
-  script runs also send check and kill requests for their handles.
-- The supervisor spawns and monitors the command with the shared
-  :mod:`mindroom.shell.execution` core. A client that disconnects mid-run
-  cancels the run, mirroring local cancellation semantics.
-- The supervisor exits when its parent runner dies or terminates it, killing
-  unfinished process groups, so restarting the worker invalidates handles.
+The sandbox runner isolates tool calls in per-request subprocesses, which can neither own
+background handles whose ``check``/``kill`` follow-ups arrive in different processes nor
+guarantee that a command dies with them. One long-lived ``python -m mindroom.shell.supervisor``
+process owns command processes and the in-memory handle registry via :mod:`mindroom.shell.runner`
+and :mod:`mindroom.shell.registry`. Client disconnect cancels the run; parent death kills all
+unfinished process groups.
 """
 
 from __future__ import annotations
@@ -30,7 +14,6 @@ import asyncio
 import atexit
 import json
 import os
-import re
 import shutil
 import signal
 import socket
@@ -44,21 +27,13 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.logging_config import get_logger
-from mindroom.shell.background_scope import BackgroundLogPolicy
-from mindroom.shell.execution import (
-    ProcessRecord,
-    ShellRunResult,
-    check_command,
-    close_background_records,
-    discard_background_record,
-    kill_all_records,
-    kill_command,
-    run_command,
-)
+from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.registry import ProcessRegistry, ProcessStatus, SignalResult
+from mindroom.shell.runner import ShellRunResult, run_foreground
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -75,7 +50,8 @@ _SUPERVISOR_TERMINATE_WAIT_SECONDS = 5.0
 _SYNC_REQUEST_TIMEOUT_SECONDS = 10.0
 _RUN_RESPONSE_GRACE_SECONDS = 30.0
 _STDERR_TAIL_BYTES = 4096
-_FINISHED_STATUS_RE = re.compile(r"^Status: FINISHED \(exit code (-?\d+)(?:,|\))")
+_VALID_STATUS_STATES = frozenset({"running", "exited", "unknown", "error"})
+_VALID_SIGNAL_OUTCOMES = frozenset({"signalled", "finished", "unknown", "error"})
 
 
 class ShellSupervisorStartupError(RuntimeError):
@@ -84,8 +60,6 @@ class ShellSupervisorStartupError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _ShellDispatchContext:
-    """Request-local supervisor socket and process environment for direct shell dispatch."""
-
     socket_path: str
     process_environ: Mapping[str, str] | None
 
@@ -113,118 +87,104 @@ def background_script_supervision_supported() -> bool:
     return sys.platform.startswith("linux")
 
 
-@dataclass(frozen=True, slots=True)
-class _ShellSupervisorStatus:
-    """Interpretation of one shell-supervisor status reply."""
-
-    state: Literal["running", "exited", "unknown", "error"]
-    exit_code: int | None = None
-
-
-def parse_shell_supervisor_status(message: str) -> _ShellSupervisorStatus:
-    """Classify one supervisor status reply, failing closed on anything unrecognized."""
-    if message.startswith("Status: RUNNING"):
-        return _ShellSupervisorStatus(state="running")
-    finished = _FINISHED_STATUS_RE.match(message)
-    if finished is not None:
-        return _ShellSupervisorStatus(state="exited", exit_code=int(finished.group(1)))
-    if message.startswith("Error: Unknown handle"):
-        return _ShellSupervisorStatus(state="unknown")
-    return _ShellSupervisorStatus(state="error")
-
-
-def parse_shell_supervisor_kill(message: str) -> Literal["signalled", "finished", "unknown", "error"]:
-    """Classify one supervisor kill reply, failing closed on anything unrecognized."""
-    if message.startswith(("Terminated process", "Force-killed process")):
-        return "signalled"
-    # Both "Process already finished (exit code N)" and "Process N already exited".
-    if message.startswith("Process "):
-        return "finished"
-    if message.startswith("Error: Unknown handle"):
-        return "unknown"
-    return "error"
-
-
 # ---------------------------------------------------------------------------
 # Server (runs inside `python -m mindroom.shell.supervisor <socket>`)
 # ---------------------------------------------------------------------------
 
 
-async def _handle_run(
-    registry: dict[str, ProcessRecord],
-    handle_reservations: set[str],
-    payload: dict[str, object],
-    reader: asyncio.StreamReader,
-    *,
-    write_progress: Callable[[str], None] | None = None,
-) -> ShellRunResult | None:
-    """Run one command, cancelling it if the client disconnects mid-wait.
+def _parse_max_runtime_seconds(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < value <= sys.float_info.max:
+        msg = "run request 'max_runtime_seconds' must be a positive finite number"
+        raise TypeError(msg)
+    return float(value)
 
-    A client that asks for progress gets it through ``write_progress`` before the result.
-    """
-    argv_payload = payload["argv"]
-    env_payload = payload["env"]
+
+def _parse_launch_payload(payload: dict[str, object]) -> tuple[dict[str, Any], str | None, bool | None]:
+    argv_payload, env_payload = payload["argv"], payload["env"]
     if not isinstance(argv_payload, list) or not isinstance(env_payload, dict):
         msg = "run request requires an 'argv' list and an 'env' object"
         raise TypeError(msg)
-    handle_payload = payload.get("handle")
-    if handle_payload is not None and not isinstance(handle_payload, str):
+    handle = payload.get("handle")
+    if handle is not None and not isinstance(handle, str):
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
-    response_timeout, max_runtime_seconds = _run_timings(payload)
-    output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
+    kill_group = payload.get("kill_group_after_exit")
+    if kill_group is not None and not isinstance(kill_group, bool):
+        msg = "run request 'kill_group_after_exit' must be a boolean"
+        raise TypeError(msg)
+    argv = [str(item) for item in argv_payload]
+    if handle is not None and background_script_supervision_supported():
+        argv = [sys.executable, "-P", "-s", "-m", "mindroom.shell.parent_death_exec", str(os.getpid()), *argv]
+    common: dict[str, Any] = {
+        "argv": argv,
+        "env": {str(k): str(v) for k, v in env_payload.items()},
+        "cwd": str(payload["cwd"]) if payload.get("cwd") is not None else None,
+        "tail": int(payload["tail"]),  # ty: ignore[invalid-argument-type]
+        "output_destination": ShellOutputDestination.from_payload(payload.get("output_destination")),
+        "launch_failure_exits": payload.get("launch_failure_exits") is True,
+    }
+    return common, handle, kill_group
+
+
+async def _handle_launch(
+    registry: ProcessRegistry,
+    payload: dict[str, object],
+    reader: asyncio.StreamReader,
+    *,
+    immediate: bool,
+    write_progress: Callable[[str], None] | None = None,
+) -> ShellRunResult | None:
+    """Run or background-spawn one command, cancelling/rolling it back if the client disconnects."""
+    common, handle, kill_group_payload = _parse_launch_payload(payload)
     background_log = BackgroundLogPolicy.from_payload(payload.get("background_log"))
-    command_argv = [str(item) for item in argv_payload]
-    if handle_payload is not None and background_script_supervision_supported():
-        command_argv = [
-            sys.executable,
-            "-P",
-            "-s",
-            "-m",
-            "mindroom.shell.parent_death_exec",
-            str(os.getpid()),
-            *command_argv,
-        ]
-    run_task = asyncio.create_task(
-        run_command(
-            registry,
-            namespace=str(payload["namespace"]),
-            argv=command_argv,
-            env={str(key): str(value) for key, value in env_payload.items()},
-            cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
-            tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
-            timeout=response_timeout,
-            on_timeout=_on_timeout(payload),
-            on_progress=write_progress if payload.get("progress") is True else None,
-            handle=handle_payload,
-            handle_reservations=handle_reservations,
-            output_destination=output_destination,
-            launch_failure_exits=payload.get("launch_failure_exits") is True,
-            max_runtime_seconds=max_runtime_seconds,
-            background_log=background_log,
-        ),
-    )
-    # EOF before the run response means the client (a per-request tool
-    # subprocess) died; cancel the run so the command is killed exactly like a
-    # cancelled local run instead of lingering with an undelivered handle.
-    eof_task = asyncio.create_task(reader.read())
-    done, _pending = await asyncio.wait({run_task, eof_task}, return_when=asyncio.FIRST_COMPLETED)
-    if eof_task in done:
-        # The client is gone even if the run finished in the same loop cycle:
-        # a handle registered by that run is undeliverable, so discard it
-        # instead of leaving the command running with no owner.
-        if run_task.done():
-            result = await run_task
-            if result.handle is not None:
-                discard_background_record(registry, result.handle)
+    max_runtime_seconds = _parse_max_runtime_seconds(payload.get("max_runtime_seconds"))
+    kill_group_after_exit = immediate if kill_group_payload is None else kill_group_payload
+
+    bg_kwargs: dict[str, Any] = {
+        **common,
+        "namespace": str(payload["namespace"]),
+        "handle": handle,
+        "kill_group_after_exit": kill_group_after_exit,
+        "max_runtime_seconds": max_runtime_seconds,
+        "background_log": background_log,
+    }
+    if immediate:
+        coro = registry.spawn_background(**bg_kwargs)
+    else:
+        timeout_payload = payload["timeout"]
+        response_timeout = None if timeout_payload is None else float(timeout_payload)  # ty: ignore[invalid-argument-type]
+        if max_runtime_seconds is not None:
+            response_timeout = (
+                max_runtime_seconds if response_timeout is None else min(response_timeout, max_runtime_seconds)
+            )
+        on_timeout = payload.get("on_timeout", "background")
+        if on_timeout not in ("background", "kill"):
+            msg = "run request 'on_timeout' must be 'background' or 'kill'"
+            raise TypeError(msg)
+        on_progress = write_progress if payload.get("progress") is True else None
+        if on_timeout == "kill":
+            coro = run_foreground(
+                timeout=response_timeout,
+                on_progress=on_progress,
+                kill_group_after_exit=kill_group_after_exit,
+                **common,
+            )
         else:
-            run_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await run_task
+            coro = registry.run_or_background(timeout=response_timeout, on_progress=on_progress, **bg_kwargs)
+
+    run_task, eof_task = asyncio.create_task(coro), asyncio.create_task(reader.read())
+    # EOF before the response means the client died; cancel the run (or discard an undeliverable handle).
+    done, pending = await asyncio.wait({run_task, eof_task}, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    if eof_task in done:
+        if run_task.done() and not run_task.cancelled() and (handle := (await run_task).handle) is not None:
+            registry.discard(handle)
         return None
-    eof_task.cancel()
-    with suppress(asyncio.CancelledError):
-        await eof_task
     return await run_task
 
 
@@ -232,40 +192,39 @@ def _write_progress(writer: asyncio.StreamWriter, text: str) -> None:
     writer.write(json.dumps({"progress": text}).encode("utf-8") + b"\n")
 
 
-def _on_timeout(payload: dict[str, object]) -> Literal["background", "kill"]:
-    """Validate what happens to a run at its timeout; script runs keep their handle by default."""
-    on_timeout = payload.get("on_timeout", "background")
-    if on_timeout == "kill":
-        return "kill"
-    if on_timeout == "background":
-        return "background"
-    msg = "run request 'on_timeout' must be 'background' or 'kill'"
-    raise TypeError(msg)
-
-
-def _run_timings(payload: dict[str, object]) -> tuple[float | None, float | None]:
-    """Validate an optional process deadline and derive the foreground wait, which None leaves unlimited."""
-    max_runtime_payload = payload.get("max_runtime_seconds")
-    if max_runtime_payload is not None and (
-        isinstance(max_runtime_payload, bool)
-        or not isinstance(max_runtime_payload, int | float)
-        or not 0 < max_runtime_payload <= sys.float_info.max
-    ):
-        msg = "run request 'max_runtime_seconds' must be a positive finite number"
-        raise TypeError(msg)
-    max_runtime_seconds = float(max_runtime_payload) if max_runtime_payload is not None else None
-    timeout_payload = payload["timeout"]
-    response_timeout = None if timeout_payload is None else float(timeout_payload)  # ty: ignore[invalid-argument-type]
-    if max_runtime_seconds is not None:
-        response_timeout = (
-            max_runtime_seconds if response_timeout is None else min(response_timeout, max_runtime_seconds)
+async def _dispatch_request(
+    registry: ProcessRegistry,
+    payload: dict[str, object],
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> ShellRunResult | ProcessStatus | SignalResult | None:
+    op = payload.get("op")
+    if op == "run":
+        return await _handle_launch(
+            registry,
+            payload,
+            reader,
+            immediate=False,
+            write_progress=partial(_write_progress, writer),
         )
-    return response_timeout, max_runtime_seconds
+    if op == "spawn_background":
+        return await _handle_launch(registry, payload, reader, immediate=True)
+    if op == "check":
+        return registry.status(namespace=str(payload["namespace"]), handle=str(payload["handle"]))
+    if op == "kill":
+        return registry.signal(
+            namespace=str(payload["namespace"]),
+            handle=str(payload["handle"]),
+            force=bool(payload.get("force", False)),
+        )
+    if op == "kill_namespace":
+        killed = await registry.close_namespace(str(payload["namespace"]))
+        return ShellRunResult(message=f"Killed {killed}.")
+    return ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.", execution_error=True)
 
 
 async def _handle_connection(
-    registry: dict[str, ProcessRecord],
-    handle_reservations: set[str],
+    registry: ProcessRegistry,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -273,45 +232,15 @@ async def _handle_connection(
         line = await reader.readline()
         if not line.strip():
             return  # Ready-probe connections close without sending a request.
-        payload = json.loads(line)
-        op = payload.get("op")
-        if op == "run":
-            result = await _handle_run(
-                registry,
-                handle_reservations,
-                payload,
-                reader,
-                write_progress=partial(_write_progress, writer),
-            )
-            if result is None:
-                return
-        elif op == "check":
-            result = ShellRunResult(
-                message=check_command(registry, namespace=str(payload["namespace"]), handle=str(payload["handle"])),
-            )
-        elif op == "kill":
-            result = ShellRunResult(
-                message=kill_command(
-                    registry,
-                    namespace=str(payload["namespace"]),
-                    handle=str(payload["handle"]),
-                    force=bool(payload.get("force", False)),
-                ),
-            )
-        elif op == "kill_namespace":
-            namespace = str(payload["namespace"])
-            matching = {h: registry.pop(h) for h, r in list(registry.items()) if r.namespace == namespace}
-            killed = len(matching)
-            await close_background_records(matching)
-            result = ShellRunResult(message=f"Killed {killed}.")
-        else:
-            result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.", execution_error=True)
+        result = await _dispatch_request(registry, json.loads(line), reader, writer)
+        if result is None:
+            return
         writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
         await writer.drain()
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         with suppress(OSError):
-            result = ShellRunResult(message=f"Error: Invalid shell supervisor request: {exc}", execution_error=True)
-            writer.write(json.dumps(asdict(result)).encode() + b"\n")
+            err = ShellRunResult(f"Error: Invalid shell supervisor request: {exc}", execution_error=True)
+            writer.write(json.dumps(asdict(err)).encode() + b"\n")
             await writer.drain()
     except OSError:
         logger.warning("shell_supervisor_connection_failed", exc_info=True)
@@ -322,14 +251,12 @@ async def _handle_connection(
 
 
 async def _serve(socket_path: str) -> int:
-    registry: dict[str, ProcessRecord] = {}
-    handle_reservations: set[str] = set()
+    registry = ProcessRegistry()
     parent_pid = os.getppid()
     stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, stop_event.set)
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop_event.set)
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations),
+        partial(_handle_connection, registry),
         path=socket_path,
         limit=_REQUEST_LIMIT_BYTES,
     )
@@ -341,12 +268,8 @@ async def _serve(socket_path: str) -> int:
                 break
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=_PARENT_POLL_INTERVAL_SECONDS)
-    # Handles cannot outlive the supervisor; kill their process groups so a
-    # runner or worker restart invalidates handles without leaking processes.
-    kill_all_records(registry)
+    registry.kill_all()
     if orphaned:
-        # The runner died without running its cleanup (e.g. SIGKILL), so
-        # remove our runtime dir ourselves.
         shutil.rmtree(Path(socket_path).parent, ignore_errors=True)
     return 0
 
@@ -359,6 +282,52 @@ def _main(argv: list[str]) -> int:
 # ---------------------------------------------------------------------------
 # Clients (run inside per-request tool subprocesses)
 # ---------------------------------------------------------------------------
+
+
+async def _send_async_request(
+    socket_path: str,
+    request: dict[str, object],
+    *,
+    deadline: float | None,
+    on_progress: Callable[[str], None] | None = None,
+    post_send_output_handled: bool = False,
+) -> ShellRunResult:
+    try:
+        reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
+    except OSError as exc:
+        return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}", execution_error=True)
+    loop = asyncio.get_running_loop()
+    try:
+        writer.write(json.dumps(request).encode("utf-8") + b"\n")
+        await writer.drain()
+        while True:
+            line = await asyncio.wait_for(
+                reader.readline(),
+                timeout=None if deadline is None else deadline - loop.time(),
+            )
+            if on_progress is None or (text := _progress_text(line)) is None:
+                break
+            on_progress(text)
+    except (TimeoutError, OSError, ValueError) as exc:
+        msg = (
+            "Error: Shell supervisor did not respond in time."
+            if isinstance(exc, TimeoutError)
+            else f"Error: Shell supervisor request failed: {exc}"
+        )
+        return ShellRunResult(msg, output_file_handled=post_send_output_handled, execution_error=True)
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+    return _parse_supervisor_response(line, output_file_handled_on_error=post_send_output_handled)
+
+
+def _launch_request(
+    op: Literal["run", "spawn_background"],
+    base: dict[str, object],
+    optional: dict[str, object],
+) -> dict[str, object]:
+    return {"op": op, **base, **{key: value for key, value in optional.items() if value is not None}}
 
 
 async def run_command_via_supervisor(
@@ -376,85 +345,104 @@ async def run_command_via_supervisor(
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
     background_log: BackgroundLogPolicy | None = None,
+    kill_group_after_exit: bool = False,
     launch_failure_exits: bool = False,
 ) -> ShellRunResult:
-    """Run one shell command and preserve its execution and output-file ownership; see ``run_command``."""
-    request: dict[str, object] = {
-        "op": "run",
-        "namespace": namespace,
-        "argv": argv,
-        "env": env,
-        "cwd": cwd,
-        "tail": tail,
-        "timeout": timeout,
-        "on_timeout": on_timeout,
-        "launch_failure_exits": launch_failure_exits,
-    }
-    optional_fields: dict[str, object] = {
-        "handle": handle,
-        "max_runtime_seconds": max_runtime_seconds,
-        "output_destination": asdict(output_destination) if output_destination is not None else None,
-        "background_log": asdict(background_log) if background_log is not None else None,
-        "progress": True if on_progress is not None else None,
-    }
-    request.update({key: value for key, value in optional_fields.items() if value is not None})
-    try:
-        reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
-    except OSError as exc:
-        return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}", execution_error=True)
-    post_send_output_handled = output_destination is not None
-    loop = asyncio.get_running_loop()
-    deadline = None if timeout is None else loop.time() + timeout + _RUN_RESPONSE_GRACE_SECONDS
-    try:
-        writer.write(json.dumps(request).encode("utf-8") + b"\n")
-        await writer.drain()
-        while True:
-            line = await asyncio.wait_for(
-                reader.readline(),
-                timeout=None if deadline is None else deadline - loop.time(),
-            )
-            if on_progress is None or (text := _progress_text(line)) is None:
-                break
-            on_progress(text)
-    except TimeoutError:
-        return ShellRunResult(
-            message="Error: Shell supervisor did not respond in time.",
-            output_file_handled=post_send_output_handled,
-            execution_error=True,
-        )
-    except (OSError, ValueError) as exc:
-        return ShellRunResult(
-            message=f"Error: Shell supervisor request failed: {exc}",
-            output_file_handled=post_send_output_handled,
-            execution_error=True,
-        )
-    finally:
-        writer.close()
-        with suppress(OSError):
-            await writer.wait_closed()
-    return _parse_supervisor_response(line, output_file_handled_on_error=post_send_output_handled)
-
-
-def check_command_via_supervisor(socket_path: str, *, namespace: str, handle: str) -> str:
-    """Poll a background handle through the supervisor."""
-    return _sync_supervisor_request(socket_path, {"op": "check", "namespace": namespace, "handle": handle})
-
-
-def kill_command_via_supervisor(socket_path: str, *, namespace: str, handle: str, force: bool = False) -> str:
-    """Kill a background handle through the supervisor."""
-    return _sync_supervisor_request(
+    """Run one shell command through the supervisor, preserving execution and output-file ownership."""
+    request = _launch_request(
+        "run",
+        {
+            "namespace": namespace,
+            "argv": argv,
+            "env": env,
+            "cwd": cwd,
+            "tail": tail,
+            "timeout": timeout,
+            "on_timeout": on_timeout,
+            "kill_group_after_exit": kill_group_after_exit,
+            "launch_failure_exits": launch_failure_exits,
+        },
+        {
+            "handle": handle,
+            "max_runtime_seconds": max_runtime_seconds,
+            "output_destination": asdict(output_destination) if output_destination is not None else None,
+            "background_log": asdict(background_log) if background_log is not None else None,
+            "progress": True if on_progress is not None else None,
+        },
+    )
+    deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout + _RUN_RESPONSE_GRACE_SECONDS
+    return await _send_async_request(
         socket_path,
-        {"op": "kill", "namespace": namespace, "handle": handle, "force": force},
+        request,
+        deadline=deadline,
+        on_progress=on_progress,
+        post_send_output_handled=output_destination is not None,
     )
 
 
+async def spawn_background_via_supervisor(
+    socket_path: str,
+    *,
+    namespace: str,
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str | None,
+    tail: int = 100,
+    handle: str | None = None,
+    max_runtime_seconds: float | None = None,
+    background_log: BackgroundLogPolicy | None = None,
+    kill_group_after_exit: bool = True,
+) -> ShellRunResult:
+    """Spawn one command directly into the supervisor's background registry without a foreground wait."""
+    request = _launch_request(
+        "spawn_background",
+        {
+            "namespace": namespace,
+            "argv": argv,
+            "env": env,
+            "cwd": cwd,
+            "tail": tail,
+            "kill_group_after_exit": kill_group_after_exit,
+        },
+        {
+            "handle": handle,
+            "max_runtime_seconds": max_runtime_seconds,
+            "background_log": asdict(background_log) if background_log is not None else None,
+        },
+    )
+    deadline = asyncio.get_running_loop().time() + _RUN_RESPONSE_GRACE_SECONDS
+    return await _send_async_request(socket_path, request, deadline=deadline)
+
+
+def check_command_via_supervisor(socket_path: str, *, namespace: str, handle: str) -> ProcessStatus:
+    """Poll a background handle through the supervisor and return its structured status."""
+    try:
+        return _parse_status_response(
+            _sync_supervisor_exchange(socket_path, {"op": "check", "namespace": namespace, "handle": handle}),
+        )
+    except OSError as exc:
+        return ProcessStatus("error", message=f"Error: Shell supervisor is unavailable: {exc}")
+
+
+def kill_command_via_supervisor(socket_path: str, *, namespace: str, handle: str, force: bool = False) -> SignalResult:
+    """Signal a background handle through the supervisor and return the structured outcome."""
+    try:
+        return _parse_signal_response(
+            _sync_supervisor_exchange(
+                socket_path,
+                {"op": "kill", "namespace": namespace, "handle": handle, "force": force},
+            ),
+        )
+    except OSError as exc:
+        return SignalResult("error", f"Error: Shell supervisor is unavailable: {exc}")
+
+
 def _kill_namespace_via_supervisor(socket_path: str, *, namespace: str) -> None:
-    """Kill every background process in *namespace* through the supervisor."""
-    _sync_supervisor_request(socket_path, {"op": "kill_namespace", "namespace": namespace})
+    with suppress(OSError):
+        _sync_supervisor_exchange(socket_path, {"op": "kill_namespace", "namespace": namespace})
 
 
 def _progress_text(line: bytes) -> str | None:
-    """Return the text of a progress line, or None for the result line."""
     try:
         payload = json.loads(line)
     except ValueError:
@@ -462,63 +450,89 @@ def _progress_text(line: bytes) -> str | None:
     return str(payload["progress"]) if isinstance(payload, dict) and "progress" in payload else None
 
 
-def _sync_supervisor_request(socket_path: str, request: dict[str, object]) -> str:
+def _sync_supervisor_exchange(socket_path: str, request: dict[str, object]) -> bytes:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(_SYNC_REQUEST_TIMEOUT_SECONDS)
+        conn.connect(socket_path)
+        conn.sendall(json.dumps(request).encode("utf-8") + b"\n")
+        buffer = bytearray()
+        while b"\n" not in buffer and len(buffer) < _REQUEST_LIMIT_BYTES:
+            if not (chunk := conn.recv(65536)):
+                break
+            buffer.extend(chunk)
+        return bytes(buffer)
+
+
+def _decode_json_object(line: bytes) -> tuple[dict[str, object] | None, str]:
+    if not line.strip():
+        return None, "Error: Shell supervisor closed the connection unexpectedly."
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(_SYNC_REQUEST_TIMEOUT_SECONDS)
-            conn.connect(socket_path)
-            conn.sendall(json.dumps(request).encode("utf-8") + b"\n")
-            line = _recv_line(conn)
-    except OSError as exc:
-        return f"Error: Shell supervisor is unavailable: {exc}"
-    return _parse_supervisor_response(line).message
-
-
-def _recv_line(conn: socket.socket) -> bytes:
-    buffer = bytearray()
-    while b"\n" not in buffer:
-        if len(buffer) >= _REQUEST_LIMIT_BYTES:
-            break
-        chunk = conn.recv(65536)
-        if not chunk:
-            break
-        buffer.extend(chunk)
-    return bytes(buffer)
+        payload = json.loads(line)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, f"Error: Invalid shell supervisor response: {exc}"
+    if not isinstance(payload, dict):
+        return None, "Error: Invalid shell supervisor response: expected JSON object."
+    return cast("dict[str, object]", payload), ""
 
 
 def _parse_supervisor_response(line: bytes, *, output_file_handled_on_error: bool = False) -> ShellRunResult:
     def error(msg: str) -> ShellRunResult:
         return ShellRunResult(message=msg, output_file_handled=output_file_handled_on_error, execution_error=True)
 
-    if not line.strip():
-        return error("Error: Shell supervisor closed the connection unexpectedly.")
+    payload, decode_error = _decode_json_object(line)
+    if payload is None:
+        return error(decode_error)
     try:
-        payload = json.loads(line)
-        message, handle, output_file_handled = payload["message"], payload["handle"], payload["output_file_handled"]
-        execution_error = payload.get("execution_error", False)
-        return_code = payload.get("return_code")
-        timed_out = payload.get("timed_out", False)
-        background_rejected = payload.get("background_rejected", False)
-    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
+        message, handle, handled = payload["message"], payload["handle"], payload["output_file_handled"]
+    except KeyError as exc:
         return error(f"Error: Invalid shell supervisor response: {exc}")
+    exec_err = payload.get("execution_error", False)
+    rc = payload.get("return_code")
+    timed_out = payload.get("timed_out", False)
+    bg_rejected = payload.get("background_rejected", False)
     if (
         not isinstance(message, str)
         or (handle is not None and not isinstance(handle, str))
-        or not isinstance(output_file_handled, bool)
-        or not isinstance(execution_error, bool)
-        or (return_code is not None and not isinstance(return_code, int))
+        or not isinstance(handled, bool)
+        or not isinstance(exec_err, bool)
         or not isinstance(timed_out, bool)
-        or not isinstance(background_rejected, bool)
+        or not isinstance(bg_rejected, bool)
+        or (rc is not None and (isinstance(rc, bool) or not isinstance(rc, int)))
     ):
         return error("Error: Invalid shell supervisor response: invalid result fields.")
-    return ShellRunResult(
-        message=message,
-        handle=handle,
-        output_file_handled=output_file_handled,
-        execution_error=execution_error,
-        return_code=return_code,
-        timed_out=timed_out,
-        background_rejected=background_rejected,
+    return ShellRunResult(message, handle, handled, exec_err, rc, timed_out, bg_rejected)
+
+
+def _wire_error_message(message: object, fallback: str) -> str:
+    return message if isinstance(message, str) and message.startswith("Error:") else fallback
+
+
+def _parse_status_response(line: bytes) -> ProcessStatus:
+    payload, decode_error = _decode_json_object(line)
+    if payload is None:
+        return ProcessStatus(state="error", message=decode_error)
+    state, exit_code, message = payload.get("state"), payload.get("exit_code"), payload.get("message")
+    valid_exit = (
+        isinstance(exit_code, int) and not isinstance(exit_code, bool) if state == "exited" else exit_code is None
+    )
+    if isinstance(state, str) and state in _VALID_STATUS_STATES and isinstance(message, str) and valid_exit:
+        return ProcessStatus(cast('Literal["running", "exited", "unknown", "error"]', state), exit_code, message)
+    return ProcessStatus(
+        "error",
+        message=_wire_error_message(message, "Error: Invalid shell supervisor response: invalid status fields."),
+    )
+
+
+def _parse_signal_response(line: bytes) -> SignalResult:
+    payload, decode_error = _decode_json_object(line)
+    if payload is None:
+        return SignalResult(outcome="error", message=decode_error)
+    outcome, message = payload.get("outcome"), payload.get("message")
+    if isinstance(outcome, str) and outcome in _VALID_SIGNAL_OUTCOMES and isinstance(message, str):
+        return SignalResult(cast('Literal["signalled", "finished", "unknown", "error"]', outcome), message)
+    return SignalResult(
+        "error",
+        _wire_error_message(message, "Error: Invalid shell supervisor response: invalid signal fields."),
     )
 
 
@@ -527,32 +541,28 @@ def _parse_supervisor_response(line: bytes, *, output_file_handled_on_error: boo
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(slots=True)
 class _SupervisorProcess:
     process: subprocess.Popen[bytes]
     socket_path: str
     stderr_path: Path
     runtime_dir: Path
 
-
-def _stderr_tail(stderr_path: Path) -> str:
-    try:
-        raw = stderr_path.read_bytes()
-    except OSError:
-        return ""
-    return raw[-_STDERR_TAIL_BYTES:].decode("utf-8", errors="replace").strip()
-
-
-def _terminate_supervisor(supervisor: _SupervisorProcess) -> None:
-    process = supervisor.process
-    if process.poll() is None:
-        process.terminate()
+    def stderr_tail(self) -> str:
         try:
-            process.wait(timeout=_SUPERVISOR_TERMINATE_WAIT_SECONDS)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-    shutil.rmtree(supervisor.runtime_dir, ignore_errors=True)
+            return self.stderr_path.read_bytes()[-_STDERR_TAIL_BYTES:].decode("utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+
+    def terminate(self) -> None:
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=_SUPERVISOR_TERMINATE_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        shutil.rmtree(self.runtime_dir, ignore_errors=True)
 
 
 class _ShellSupervisorManager:
@@ -567,16 +577,15 @@ class _ShellSupervisorManager:
         with self._lock:
             supervisor = self._supervisor
             if supervisor is not None and supervisor.process.poll() is not None:
-                logger.warning("shell_supervisor_died", stderr_tail=_stderr_tail(supervisor.stderr_path))
+                logger.warning("shell_supervisor_died", stderr_tail=supervisor.stderr_tail())
                 shutil.rmtree(supervisor.runtime_dir, ignore_errors=True)
-                self._supervisor = None
-                supervisor = None
+                self._supervisor = supervisor = None
             if supervisor is None:
                 supervisor = self._spawn()
                 try:
                     _wait_supervisor_ready(supervisor)
                 except ShellSupervisorStartupError:
-                    _terminate_supervisor(supervisor)
+                    supervisor.terminate()
                     raise
                 self._supervisor = supervisor
             return supervisor.socket_path
@@ -597,7 +606,7 @@ class _ShellSupervisorManager:
             supervisor = self._supervisor
             self._supervisor = None
         if supervisor is not None:
-            _terminate_supervisor(supervisor)
+            supervisor.terminate()
 
     def _spawn(self) -> _SupervisorProcess:
         runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-"))
@@ -616,22 +625,14 @@ class _ShellSupervisorManager:
             shutil.rmtree(runtime_dir, ignore_errors=True)
             msg = f"Failed to start the shell supervisor: {exc}"
             raise ShellSupervisorStartupError(msg) from exc
-        return _SupervisorProcess(
-            process=process,
-            socket_path=socket_path,
-            stderr_path=stderr_path,
-            runtime_dir=runtime_dir,
-        )
+        return _SupervisorProcess(process, socket_path, stderr_path, runtime_dir)
 
 
 def _wait_supervisor_ready(supervisor: _SupervisorProcess) -> None:
     deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
     while True:
         if supervisor.process.poll() is not None:
-            msg = (
-                f"Shell supervisor exited during startup "
-                f"(code {supervisor.process.returncode}): {_stderr_tail(supervisor.stderr_path)}"
-            )
+            msg = f"Shell supervisor exited during startup (code {supervisor.process.returncode}): {supervisor.stderr_tail()}"
             raise ShellSupervisorStartupError(msg)
         if time.monotonic() >= deadline:
             msg = "Shell supervisor did not become ready in time."

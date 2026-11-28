@@ -23,8 +23,9 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
 )
 from mindroom.desktop.reply_fitting import fits_inline
-from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellOutput
+from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
+from mindroom.shell.output import SpoolCapture
 from tests.desktop_helpers import (
     _LARGE_OUTPUT,
     _LONGEST_SESSION_ID,
@@ -650,14 +651,14 @@ async def test_undelivered_output_of_a_finished_run_shell_stays_pageable_until_p
         "mindroom.desktop.shell_actions.upload_encrypted_media",
         AsyncMock(side_effect=DesktopMediaError("Matrix media upload failed: offline")),
     )
-    released: list[DesktopShellOutput] = []
-    release = DesktopShellOutput.release
+    released: list[SpoolCapture] = []
+    close = SpoolCapture.close
 
-    def record_release(output: DesktopShellOutput) -> None:
+    def record_release(output: SpoolCapture) -> None:
         released.append(output)
-        release(output)
+        close(output)
 
-    monkeypatch.setattr(DesktopShellOutput, "release", record_release)
+    monkeypatch.setattr(SpoolCapture, "close", record_release)
     content = b"".join(f"line {number:05}\n".encode() for number in range(9_000))
     (tmp_path / "log").write_bytes(content)
     shell = _local_shell()

@@ -17,9 +17,15 @@ from mindroom.desktop.configuration import DesktopConfigurationState, DesktopCon
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_media
 from mindroom.desktop.protocol import DesktopAction, DesktopCommand, DesktopResponse
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
-from mindroom.shell import execution, output_capture
-from mindroom.shell.execution import shell_call_timeout
-from mindroom.shell.output_capture import format_shell_completion, format_shell_timeout
+from mindroom.shell import output_capture
+from mindroom.shell.output import (
+    ShellOutputBuffer,
+    ShellOutputProgress,
+    format_shell_completion,
+    format_shell_success,
+    format_shell_timeout,
+)
+from mindroom.shell.policy import shell_args_to_command, shell_call_timeout
 from mindroom.tool_jobs.control import current_job_id
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
@@ -96,7 +102,7 @@ def _nonempty_str(value: object) -> str | None:
 
 
 def _validate_args(args: object, tail: object, limit: object, cwd: object) -> tuple[str, int, float | None, str | None]:
-    command = execution.shell_args_to_command(args)
+    command = shell_args_to_command(args)
     if len(command) > 8192:
         msg = "Shell command must not exceed 8192 characters."
         raise ValueError(msg)
@@ -179,7 +185,7 @@ class _DesktopShellRunner:
         self.timed_out = False
         self.exit_code: int | None = None
         self.warning: str | None = None
-        self.buffers = (execution.ShellOutputBuffer(), execution.ShellOutputBuffer())
+        self.buffers = (ShellOutputBuffer(), ShellOutputBuffer())
         self.offsets = [0, 0]
 
     async def _raw(self, action: DesktopAction, params: _Params, wait: float) -> DesktopResponse:
@@ -424,7 +430,7 @@ class _DesktopShellRunner:
             errors = self.buffers[1].render() if self.buffers[1] else None
             body = format_shell_completion(self.buffers[0].render(tail=tail), errors, return_code=exit_code)
         else:
-            body = execution.format_shell_success(self.buffers[0], self.buffers[1], tail)
+            body = format_shell_success(self.buffers[0], self.buffers[1], tail)
             if self.state == "killed":
                 body = f"Command was killed on the desktop.\n{body}" if body else "Command was killed on the desktop."
         return _with_truncation_notice(body, truncated=self.truncated)
@@ -448,7 +454,7 @@ class _DesktopShellRunner:
         deadline = (
             None if stop_after is None else time.monotonic() + max(0.0, stop_after - min(start_elapsed, start_wait))
         )
-        progress = execution.ShellOutputProgress(report_tool_progress, *self.buffers)
+        progress = ShellOutputProgress(report_tool_progress, *self.buffers)
         poll_index = 0
         while self.state == "running":
             progress.poll()

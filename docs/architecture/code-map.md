@@ -565,8 +565,15 @@ Matrix sync callback
 | `workers/backend_kinds.py` | The worker backends `MINDROOM_WORKER_BACKEND` can select, the one table of its accepted values, and which backends are dedicated |
 | `workers/progress.py` | Warmup progress of the workers a dedicated Docker or Kubernetes backend starts, sent to every caller waiting on the same worker |
 | `workers/backends/dedicated_launch.py` | The runner environment and startup manifest every dedicated Docker or Kubernetes worker starts with, from its backend's container layout |
-| `shell/output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
-| `shell/execution.py` | Shell command execution core: spawning, output buffering, stopping at a timeout, and the handle registry of Desktop shell and script runs |
+| `shell/process.py` | Managed OS process lifecycle, Linux idle/systemd slice launch wrapping, and Bash 126/127 launch classification (with `shell/_process_target.py` for verified cgroup v2 scope/session targeting and `shell/parent_death_exec.py` for parent-death supervision) |
+| `shell/output.py` | Pure shell output primitives: rolling tail buffers, bounded temp spools (`SpoolCapture`), stream draining, and completion/timeout formatters |
+| `shell/output_capture.py` | Workspace output-file destination policy, completion validation, and atomic publication composing `SpoolCapture` |
+| `shell/background_log.py` | Bounded live log files, rotation/sweeping, and status trailers for auto-backgrounded shell runs |
+| `shell/runner.py` | Registry-free foreground shell execution (`run_foreground`) and the shared `ActiveCommand` lifecycle helper |
+| `shell/registry.py` | Background shell process ownership (`ProcessRegistry`, `BackgroundProcess`), handle reservations, limits, and structured status/signal results |
+| `shell/background_scope.py` | Turn-scoped shell auto-backgrounding and remote cleanup tracking |
+| `shell/policy.py` | Shell argument normalization and foreground/request timeout budget helpers |
+| `shell/streaming.py` | Raw byte-streamed command execution (`CommandStdin`, `stream_command`) for `workers run` |
 | `shell/supervisor.py` | Worker-local shell supervisor process that runs shell commands and script handles for sandbox request subprocesses, stopping a command whose relay dies |
 | `terminal/session.py` | Persistent shells in a pty in the sandbox runner: scrollback, attached viewers, input, resize, and the idle end |
 | `api/worker_terminal.py` | Runner routes that open, list, and close an owner's terminals, and the websocket a viewer attaches with |

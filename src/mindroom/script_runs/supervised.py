@@ -17,9 +17,7 @@ from mindroom.script_runs.wire import ScriptWorkerError, WorkerScriptCancel, Wor
 from mindroom.shell.supervisor import (
     check_command_via_supervisor,
     kill_command_via_supervisor,
-    parse_shell_supervisor_kill,
-    parse_shell_supervisor_status,
-    run_command_via_supervisor,
+    spawn_background_via_supervisor,
 )
 
 if TYPE_CHECKING:
@@ -84,7 +82,7 @@ async def launch_supervised_script(
     }
     script_environment.pop(CONTROL_STATE_PATH_ENV, None)
     handle = supervisor_handle_for_run(run_id)
-    result = await run_command_via_supervisor(
+    result = await spawn_background_via_supervisor(
         socket_path,
         namespace=namespace,
         # The shim runs from the workspace: `-P` and `-s` keep its cwd and the user site off `sys.path`.
@@ -100,7 +98,6 @@ async def launch_supervised_script(
         env=script_environment,
         cwd=str(workspace),
         tail=200,
-        timeout=0,
         handle=handle,
         max_runtime_seconds=max_runtime_seconds,
     )
@@ -109,18 +106,17 @@ async def launch_supervised_script(
 
 async def supervised_script_status(socket_path: str, *, namespace: str, run_id: str) -> WorkerScriptStatus:
     """Return one run's process state; raise `ScriptWorkerError` on a reply the supervisor does not vouch for."""
-    message = await asyncio.to_thread(
+    status = await asyncio.to_thread(
         check_command_via_supervisor,
         socket_path,
         namespace=namespace,
         handle=supervisor_handle_for_run(run_id),
     )
-    status = parse_shell_supervisor_status(message)
     if status.state == "error":
-        raise ScriptWorkerError(message)
+        raise ScriptWorkerError(status.message)
     if status.state == "unknown":
         return WorkerScriptStatus(state="unknown")
-    return WorkerScriptStatus(state=status.state, output=message, exit_code=status.exit_code)
+    return WorkerScriptStatus(state=status.state, output=status.message, exit_code=status.exit_code)
 
 
 async def signal_supervised_script(
@@ -131,18 +127,17 @@ async def signal_supervised_script(
     force: bool,
 ) -> WorkerScriptCancel:
     """Send SIGTERM, or SIGKILL with *force*, to one run's process group; raise `ScriptWorkerError` on any other reply."""
-    message = await asyncio.to_thread(
+    result = await asyncio.to_thread(
         kill_command_via_supervisor,
         socket_path,
         namespace=namespace,
         handle=supervisor_handle_for_run(run_id),
         force=force,
     )
-    outcome = parse_shell_supervisor_kill(message)
-    if outcome == "error":
-        raise ScriptWorkerError(message)
+    if result.outcome == "error":
+        raise ScriptWorkerError(result.message)
     return WorkerScriptCancel(
-        cancel_requested=outcome == "signalled",
-        already_finished=outcome == "finished",
-        unknown_handle=outcome == "unknown",
+        cancel_requested=result.outcome == "signalled",
+        already_finished=result.outcome == "finished",
+        unknown_handle=result.outcome == "unknown",
     )

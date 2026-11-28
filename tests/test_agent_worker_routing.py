@@ -13,7 +13,8 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.message_target import MessageTarget
-from mindroom.shell.execution import ShellRunResult
+from mindroom.shell.registry import ProcessRegistry
+from mindroom.shell.runner import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.invocation import ToolCallContext
@@ -96,7 +97,8 @@ def _local_execution_sinks(monkeypatch: pytest.MonkeyPatch) -> None:
         del self, action, a, b
         return "local:calculator"
 
-    monkeypatch.setattr(shell_module, "run_command", run_command)
+    monkeypatch.setattr(shell_module, "run_foreground", run_command)
+    monkeypatch.setattr(ProcessRegistry, "run_or_background", run_command)
     monkeypatch.setattr(CalculatorTools, "calculate", tool(calculate))
     monkeypatch.delenv("MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET", raising=False)
 

@@ -477,6 +477,7 @@ depends_on = [
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
     "mindroom.workers.backend_kinds",
+    "mindroom.tools.shell",
 ]
 visibility = [
     "mindroom.agent_cli.response_owner",
@@ -510,6 +511,8 @@ visibility = [
     "mindroom.approval.tool_owners",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
+    "mindroom.shell.output_capture",
+    "mindroom.shell.policy",
 ]
 
 [[interfaces]]
@@ -1762,6 +1765,9 @@ depends_on = [
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.progress",
+    "mindroom.shell.output",
+    "mindroom.shell.output_capture",
+    "mindroom.shell.policy",
 ]
 visibility = ["mindroom.custom_tools.desktop"]
 
@@ -2444,6 +2450,11 @@ depends_on = [
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.registry",
     "mindroom.terminal.session",
+    "mindroom.shell.background_scope",
+    "mindroom.shell.policy",
+    "mindroom.shell.registry",
+    "mindroom.shell.streaming",
+    "mindroom.shell.supervisor",
 ]
 
 [[modules]]
@@ -2476,6 +2487,7 @@ depends_on = [
     "mindroom.script_runs.launch_contract",
     "mindroom.script_runs.supervised",
     "mindroom.script_runs.wire",
+    "mindroom.shell.supervisor",
 ]
 
 [[modules]]
@@ -2520,6 +2532,7 @@ path = "mindroom.script_runs.supervised"
 depends_on = [
     "mindroom.script_runs.launch_contract",
     "mindroom.script_runs.wire",
+    "mindroom.shell.supervisor",
 ]
 
 [[modules]]
@@ -4344,6 +4357,7 @@ depends_on = [
     "mindroom.config.resolution",
     "mindroom.turn_model",
     "mindroom.delegation.cost",
+    "mindroom.shell.background_scope",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -5084,11 +5098,20 @@ depends_on = ["mindroom.path_confinement"]
 
 [[modules]]
 path = "mindroom.desktop.shell"
-depends_on = ["mindroom.desktop.protocol"]
+depends_on = [
+    "mindroom.desktop.protocol",
+    "mindroom.shell.output",
+    "mindroom.shell.registry",
+]
 
 [[modules]]
 path = "mindroom.desktop.login_environment"
-depends_on = ["mindroom.constants", "mindroom.desktop.shell"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.desktop.protocol",
+    "mindroom.shell.output",
+    "mindroom.shell.runner",
+]
 
 [[modules]]
 path = "mindroom.desktop.shell_prompt"
@@ -5725,6 +5748,7 @@ depends_on = [
     "mindroom.turn_model",
     "mindroom.history.storage",
     "mindroom.session_storage.lanes",
+    "mindroom.shell.background_scope",
 ]
 
 [[modules]]
@@ -6768,6 +6792,7 @@ visibility = [
     "mindroom.custom_tools.desktop_shell",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.output_files",
+    "mindroom.tools.shell",
 ]
 
 [[modules]]
@@ -6882,6 +6907,8 @@ depends_on = [
     "mindroom.egress_broker",
     "mindroom.workers.backend_kinds",
     "mindroom.config.tool_aliases",
+    "mindroom.shell.background_scope",
+    "mindroom.shell.policy",
 ]
 
 [[modules]]
@@ -9484,6 +9511,7 @@ depends_on = [
     "mindroom.tool_system.registry",
     "mindroom.delegation.cost",
     "mindroom.tool_jobs.control",
+    "mindroom.shell.background_scope",
 ]
 visibility = [
     "mindroom.custom_tools.workflow",
@@ -10123,6 +10151,7 @@ depends_on = [
     "mindroom.tool_system.call_record",
     "mindroom.failure_text",
     "mindroom.tool_system.progress",
+    "mindroom.shell.background_scope",
 ]
 visibility = [
     "mindroom.custom_tools.workflow",
@@ -10180,6 +10209,7 @@ visibility = [
     "mindroom.custom_tools.desktop_shell",
     "mindroom.custom_tools.job",
     "mindroom.secret_request_cards",
+    "mindroom.shell.policy",
 ]
 
 [[modules]]
@@ -10281,6 +10311,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
+    "mindroom.shell.policy",
 ]
 visibility = [
     # Agent assembly admits the calls of agents and team leaders as jobs, and the loop hooks offer their wait budget.
@@ -10336,6 +10367,7 @@ depends_on = [
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.resources",
     "mindroom.tool_system.context_bound_streams",
+    "mindroom.shell.background_scope",
 ]
 visibility = [
     "mindroom.approval.execution",
@@ -11776,4 +11808,145 @@ depends_on = [
     "mindroom.custom_tools.triggers",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registration",
+]
+
+# Shell execution engine: strictly acyclic DAG from process/output primitives up to registry, scope, policy, and supervisor.
+[[modules]]
+path = "mindroom.shell._process_target"
+depends_on = []
+visibility = ["mindroom.shell.process"]
+
+[[modules]]
+path = "mindroom.shell.parent_death_exec"
+depends_on = []
+visibility = []
+
+[[modules]]
+path = "mindroom.shell.process"
+depends_on = ["mindroom.shell._process_target"]
+visibility = [
+    "mindroom.shell.runner",
+    "mindroom.shell.streaming",
+]
+
+[[modules]]
+path = "mindroom.shell.output"
+depends_on = []
+visibility = [
+    "mindroom.custom_tools.desktop_shell",
+    "mindroom.desktop.login_environment",
+    "mindroom.desktop.shell",
+    "mindroom.shell.output_capture",
+    "mindroom.shell.registry",
+    "mindroom.shell.runner",
+]
+
+[[modules]]
+path = "mindroom.shell.background_log"
+depends_on = ["mindroom.path_confinement"]
+visibility = [
+    "mindroom.shell.registry",
+    "mindroom.shell.supervisor",
+    "mindroom.tools.shell",
+]
+
+[[modules]]
+path = "mindroom.shell.output_capture"
+depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.shell.output",
+    "mindroom.tool_system.output_files",
+]
+visibility = [
+    "mindroom.custom_tools.desktop_shell",
+    "mindroom.shell.runner",
+    "mindroom.shell.supervisor",
+    "mindroom.tools.shell",
+]
+
+[[modules]]
+path = "mindroom.shell.streaming"
+depends_on = ["mindroom.shell.process"]
+visibility = ["mindroom.api.sandbox_runner"]
+
+[[modules]]
+path = "mindroom.shell.runner"
+depends_on = [
+    "mindroom.shell.output",
+    "mindroom.shell.output_capture",
+    "mindroom.shell.process",
+]
+visibility = [
+    "mindroom.desktop.login_environment",
+    "mindroom.shell.registry",
+    "mindroom.shell.supervisor",
+    "mindroom.tools.shell",
+]
+
+[[modules]]
+path = "mindroom.shell.registry"
+depends_on = [
+    "mindroom.shell.background_log",
+    "mindroom.shell.output",
+    "mindroom.shell.runner",
+]
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.desktop.shell",
+    "mindroom.shell.background_scope",
+    "mindroom.shell.supervisor",
+]
+
+[[modules]]
+path = "mindroom.shell.background_scope"
+depends_on = ["mindroom.shell.registry"]
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.delegation.lifecycle",
+    "mindroom.matrix_rtc.call_tools",
+    "mindroom.shell.policy",
+    "mindroom.teams",
+    "mindroom.tool_jobs.execution_scope",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tools.shell",
+]
+
+[[modules]]
+path = "mindroom.shell.policy"
+depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.shell.background_scope",
+    "mindroom.tool_jobs.control",
+]
+
+[[modules]]
+path = "mindroom.shell.supervisor"
+depends_on = [
+    "mindroom.shell.background_log",
+    "mindroom.shell.output_capture",
+    "mindroom.shell.registry",
+    "mindroom.shell.runner",
+]
+
+[[modules]]
+path = "mindroom.tools.shell"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.path_confinement",
+    "mindroom.shell.background_log",
+    "mindroom.shell.background_scope",
+    "mindroom.shell.output_capture",
+    "mindroom.shell.policy",
+    "mindroom.shell.runner",
+    "mindroom.shell.supervisor",
+    "mindroom.terminal.session",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.progress",
+    "mindroom.tool_system.registration",
+    "mindroom.tool_system.tool_environment",
+    "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.tool_schema",
 ]

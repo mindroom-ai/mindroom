@@ -186,8 +186,8 @@ async def test_saved_capabilities_define_the_bridge_without_a_gui_provider(
             round(time.time() * 1000) + 60_000,
         )
         result = await bridge.shell.execute(request)
-        assert result.output.read() == b"from-login-shell"
-        result.output.release()
+        assert result.output.stdout.pread() == b"from-login-shell"
+        result.output.close()
     finally:
         await session.close()
 

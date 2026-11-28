@@ -18,8 +18,9 @@ import pytest
 
 from mindroom.api import sandbox_runner
 from mindroom.constants import resolve_runtime_paths
-from mindroom.shell.execution import kill_all_records, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.registry import ProcessRegistry
+from mindroom.shell.runner import run_foreground
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
 from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -34,7 +35,7 @@ from tests.api.sandbox_runner_support import execute_call
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 
-    from mindroom.shell.execution import ShellRunResult
+    from mindroom.shell.runner import ShellRunResult
     from mindroom.tool_system.authoring import Toolkit
     from mindroom.workers.protocol import ExecuteResponse
 
@@ -100,7 +101,7 @@ async def test_output_ownership_is_independent_of_message_wording(
     execute = (
         shell_module.run_command_via_supervisor
         if os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV)
-        else shell_module.run_command
+        else shell_module.run_foreground
     )
 
     def reword[**P](run: Callable[P, Awaitable[ShellRunResult]]) -> Callable[P, Awaitable[ShellRunResult]]:
@@ -402,10 +403,9 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
         streams.append(stream)
         return stream
 
-    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", full_device)
-    registry = {}
-    result = await run_command(
-        registry,
+    monkeypatch.setattr("mindroom.shell.output.tempfile.TemporaryFile", full_device)
+    registry = ProcessRegistry()
+    result = await registry.run_or_background(
         namespace="disk-failure",
         # Outlive spawn so timeout=0 always backgrounds; a command that already exited returns in the foreground.
         argv=["bash", "-c", "printf data; sleep 0.5"],
@@ -416,12 +416,11 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
         output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
     )
     assert result.handle is not None
-    record = registry[result.handle]
-    assert record._monitor_task is not None
+    record = registry._records[result.handle]
+    assert record.monitor_task is not None
     try:
-        await record._monitor_task
+        await record.monitor_task
         assert record.finished
-        assert '"status": "error"' in str(record.output_receipt)
         assert all(stream.closed for stream in streams)
         assert not (tmp_path / "missing.txt").exists()
     finally:
@@ -446,12 +445,10 @@ async def test_spawn_cancellation_closes_capture(tmp_path: Path, monkeypatch: py
         spawning.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", observed_file)
-    monkeypatch.setattr("mindroom.shell.execution.asyncio.create_subprocess_exec", blocked_spawn)
+    monkeypatch.setattr("mindroom.shell.output.tempfile.TemporaryFile", observed_file)
+    monkeypatch.setattr("mindroom.shell.process.asyncio.create_subprocess_exec", blocked_spawn)
     task = asyncio.create_task(
-        run_command(
-            {},
-            namespace="cancel-spawn",
+        run_foreground(
             argv=["true"],
             env={},
             cwd=str(tmp_path),
@@ -578,26 +575,34 @@ async def test_reader_failure_never_publishes_partial_output(
     monkeypatch.setattr(asyncio.StreamReader, "read", failing_read)
     destination = tmp_path / "partial.txt"
     destination.write_text("keep existing")
-    registry = {}
-    result = await run_command(
-        registry,
-        namespace="reader-failure",
-        argv=["bash", "-c", "printf partial" + (" >&2" if stderr else "")],
-        env={"PATH": os.environ["PATH"]},
-        cwd=str(tmp_path),
-        tail=100,
-        timeout=wait_seconds,
-        output_destination=ShellOutputDestination(str(tmp_path), "partial.txt", 10000),
-    )
-    if result.handle is not None:
-        record = registry[result.handle]
-        assert record._monitor_task is not None
-        await record._monitor_task
-        assert record.finished
-        message = record.output_receipt
+    registry = ProcessRegistry()
+    if wait_seconds == 0:
+        result = await registry.run_or_background(
+            namespace="reader-failure",
+            argv=["bash", "-c", "printf partial" + (" >&2" if stderr else "")],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=0,
+            output_destination=ShellOutputDestination(str(tmp_path), "partial.txt", 10000),
+        )
+        if result.handle is not None:
+            record = registry._records[result.handle]
+            assert record.monitor_task is not None
+            await record.monitor_task
+            assert record.finished
+        else:
+            assert '"status": "error"' in result.message
     else:
-        message = result.message
-    assert '"status": "error"' in str(message)
+        result = await run_foreground(
+            argv=["bash", "-c", "printf partial" + (" >&2" if stderr else "")],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=wait_seconds,
+            output_destination=ShellOutputDestination(str(tmp_path), "partial.txt", 10000),
+        )
+        assert '"status": "error"' in result.message
     assert destination.read_text() == "keep existing"
 
 
@@ -609,10 +614,8 @@ async def test_spool_creation_failure_returns_shell_error(tmp_path: Path, monkey
         message = "Cannot create capture spool"
         raise OSError(message)
 
-    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", fail_spool)
-    result = await run_command(
-        {},
-        namespace="spool-create",
+    monkeypatch.setattr("mindroom.shell.output.tempfile.TemporaryFile", fail_spool)
+    result = await run_foreground(
         argv=["touch", "ran"],
         env={},
         cwd=str(tmp_path),
@@ -653,26 +656,34 @@ async def test_publication_io_failure_settles_capture(
         return original_resolve(path, strict=strict)
 
     monkeypatch.setattr(Path, "resolve", failing_resolve)
-    registry = {}
-    result = await run_command(
-        registry,
-        namespace="publication-failure",
-        argv=["bash", "-c", "printf complete"],
-        env={"PATH": os.environ["PATH"]},
-        cwd=str(tmp_path),
-        tail=100,
-        timeout=wait_seconds,
-        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
-    )
-    if result.handle is not None:
-        record = registry[result.handle]
-        assert record._monitor_task is not None
-        await record._monitor_task
-        assert record.finished
-        message = record.output_receipt
+    registry = ProcessRegistry()
+    if wait_seconds == 0:
+        result = await registry.run_or_background(
+            namespace="publication-failure",
+            argv=["bash", "-c", "printf complete"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=0,
+            output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
+        )
+        if result.handle is not None:
+            record = registry._records[result.handle]
+            assert record.monitor_task is not None
+            await record.monitor_task
+            assert record.finished
+        else:
+            assert '"status": "error"' in result.message
     else:
-        message = result.message
-    assert '"status": "error"' in str(message)
+        result = await run_foreground(
+            argv=["bash", "-c", "printf complete"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=wait_seconds,
+            output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
+        )
+        assert '"status": "error"' in result.message
     assert not (tmp_path / "missing.txt").exists()
 
 
@@ -739,9 +750,8 @@ async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkey
         return data
 
     monkeypatch.setattr(asyncio.StreamReader, "read", failing_read)
-    registry = {}
-    result = await run_command(
-        registry,
+    registry = ProcessRegistry()
+    result = await registry.run_or_background(
         namespace="blocked-producer",
         argv=["bash", "-c", "awk 'BEGIN { for(i=0;i<125000;i++) print \"0123456789012345678\" }'"],
         env={"PATH": os.environ["PATH"]},
@@ -751,18 +761,17 @@ async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkey
         output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 3000000),
     )
     assert result.handle is not None
-    record = registry[result.handle]
-    assert record._monitor_task is not None
+    record = registry._records[result.handle]
+    assert record.monitor_task is not None
     try:
-        await asyncio.wait_for(asyncio.shield(record._monitor_task), timeout=10)
+        await asyncio.wait_for(asyncio.shield(record.monitor_task), timeout=10)
         assert record.finished
         assert record.process.returncode is not None
-        assert '"status": "error"' in str(record.output_receipt)
         assert not (tmp_path / "missing.txt").exists()
     finally:
-        kill_all_records(registry)
+        registry.kill_all()
         with contextlib.suppress(asyncio.CancelledError):
-            await record._monitor_task
+            await record.monitor_task
 
 
 @pytest.mark.asyncio

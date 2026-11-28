@@ -460,3 +460,11 @@ def test_tool_auto_install_smoke_entrypoint_imports() -> None:
 def test_delegation_dependencies_point_toward_state_and_storage(module: str, forbidden: tuple[str, ...]) -> None:
     """Storage/audit cannot boot execution; the driver cannot construct its response adapter."""
     _assert_probe_clean(module, forbidden)
+
+
+def test_shell_supervisor_stays_independent_of_tool_jobs_and_background_scope() -> None:
+    """Supervisor startup must not load job runtime or turn background-scope modules."""
+    _assert_probe_clean(
+        "mindroom.shell.supervisor",
+        ("mindroom.tool_jobs", "mindroom.shell.background_scope"),
+    )

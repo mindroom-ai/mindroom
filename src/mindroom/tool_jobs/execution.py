@@ -26,7 +26,7 @@ from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
 from mindroom.reply_scope import current_reply_event_id, current_span
 from mindroom.session_storage.types import session_state_snapshot
-from mindroom.shell.execution import shell_job_wait_seconds
+from mindroom.shell.policy import shell_job_wait_seconds
 from mindroom.tool_jobs.approvals import ask_tool_call_approval
 from mindroom.tool_jobs.authorization import toolkit_authority
 from mindroom.tool_jobs.background_after import (

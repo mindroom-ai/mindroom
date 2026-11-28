@@ -5,32 +5,24 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import os
 import re
 import shutil
 import tempfile
 import time
 import unicodedata
+import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES
-from mindroom.shell.execution import (
-    MAX_BACKGROUNDED,
-    ProcessRecord,
-    discard_background_record,
-    kill_all_records,
-    run_command,
-    signal_record,
-)
-from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell.output import SpoolCapture, SpoolStream
+from mindroom.shell.registry import MAX_BACKGROUNDED, BackgroundProcess, ProcessRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-
-    from mindroom.shell.output_capture import CapturedShellStream
 
 _INLINE_WAIT_SAFETY_SECONDS = 10.0
 _MAX_COMMAND = 8_192
@@ -79,99 +71,18 @@ class DesktopShellRequest:
     max_runtime_seconds: float | None = None
 
 
-class DesktopShellOutput(ShellOutputCapture):
-    """Spool one command's stdout and stderr privately until the bridge transfers them."""
-
-    def __init__(self, directory: str) -> None:
-        super().__init__(ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES))
-        self.exit_code: int | None = None
-        self.completed = False
-
-    def _stream_size(self, stream: CapturedShellStream) -> int:
-        stream.file.flush()
-        return os.fstat(stream.file.fileno()).st_size
-
-    def _stream_read(self, stream: CapturedShellStream, offset: int = 0, max_bytes: int | None = None) -> bytes:
-        size = self._stream_size(stream)
-        return os.pread(stream.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
-
-    def _stream_tail(self, stream: CapturedShellStream, max_bytes: int) -> bytes:
-        return self._stream_read(stream, max(0, self._stream_size(stream) - max_bytes))
-
-    def _check_stream_offset(self, stream: CapturedShellStream, offset: int, *, label: str) -> None:
-        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-            message = f"Shell {label} offset must be a nonnegative integer."
-            raise DesktopShellError(message)
-        size = self._stream_size(stream)
-        if offset > size:
-            message = f"Shell {label} offset is past the captured {label} ({size} bytes)."
-            raise DesktopShellError(message)
-        # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
-        if offset < size and self._stream_read(stream, offset, 1)[0] & 0xC0 == 0x80:
-            message = f"Shell {label} offset must be at the start of a UTF-8 character."
-            raise DesktopShellError(message)
-
-    @property
-    def size(self) -> int:
-        """Return the retained stdout UTF-8 bytes, at most the capture cap."""
-        return self._stream_size(self.stdout)
-
-    @property
-    def truncated(self) -> bool:
-        """Report stdout dropped past the cap or lost to a capture error."""
-        return self.stdout.error is not None
-
-    def read(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
-        """Return retained stdout from byte *offset*, at most *max_bytes* of it.
-
-        ``pread`` leaves the file position where the engine's next write appends.
-        """
-        return self._stream_read(self.stdout, offset, max_bytes)
-
-    def tail(self, max_bytes: int) -> bytes:
-        """Return at most the newest *max_bytes* bytes of stdout; the first character may be partial."""
-        return self._stream_tail(self.stdout, max_bytes)
-
-    def check_offset(self, offset: int) -> None:
-        """Reject a stdout offset that is negative, past the retained output, or inside a character."""
-        self._check_stream_offset(self.stdout, offset, label="output")
-
-    @property
-    def stderr_size(self) -> int:
-        """Return the retained stderr UTF-8 bytes, at most the capture cap."""
-        return self._stream_size(self.stderr)
-
-    @property
-    def stderr_truncated(self) -> bool:
-        """Report stderr dropped past the cap or lost to a capture error."""
-        return self.stderr.error is not None
-
-    def read_stderr(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
-        """Return retained stderr from byte *offset*, at most *max_bytes* of it."""
-        return self._stream_read(self.stderr, offset, max_bytes)
-
-    def tail_stderr(self, max_bytes: int) -> bytes:
-        """Return at most the newest *max_bytes* bytes of stderr; the first character may be partial."""
-        return self._stream_tail(self.stderr, max_bytes)
-
-    def check_stderr_offset(self, offset: int) -> None:
-        """Reject a stderr offset that is negative, past the retained stderr, or inside a character."""
-        self._check_stream_offset(self.stderr, offset, label="stderr")
-
-    def publish(self, return_code: int | None) -> str:
-        """Record completion; the bridge transfers the spool instead of writing a workspace file."""
-        self.exit_code = return_code
-        self.completed = True
-        return ""
-
-    def close(self) -> None:
-        """Release on cancellation or eviction; after completion the spool waits for transfer."""
-        if not self.completed:
-            self.release()
-
-    def release(self) -> None:
-        """Remove the spool after transfer or handle cleanup."""
-        super().close()
+def _check_stream_offset(stream: SpoolStream, offset: int, *, label: str) -> None:
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        message = f"Shell {label} offset must be a nonnegative integer."
+        raise DesktopShellError(message)
+    size = stream.size
+    if offset > size:
+        message = f"Shell {label} offset is past the captured {label} ({size} bytes)."
+        raise DesktopShellError(message)
+    # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
+    if offset < size and stream.pread(offset, 1)[0] & 0xC0 == 0x80:
+        message = f"Shell {label} offset must be at the start of a UTF-8 character."
+        raise DesktopShellError(message)
 
 
 @dataclass(frozen=True)
@@ -185,7 +96,7 @@ class DesktopShellResult:
     state: Literal["completed", "killed", "running"]
     handle: str | None
     exit_code: int | None
-    output: DesktopShellOutput
+    output: SpoolCapture
     timed_out: bool = False
 
 
@@ -195,15 +106,20 @@ class _ShellHandle:
     agent_name: str
     command: str
     started_at: float
-    output: DesktopShellOutput
+    output: SpoolCapture
+    namespace: str
     killed: bool = False
     controller_key: str = ""
     request_id: str = ""
+    finished_at: float | None = None
+    return_code: int | None = None
+    timed_out: bool = False
 
-    def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
-        if not record.finished:
+    @property
+    def state(self) -> Literal["completed", "killed", "running"]:
+        if self.finished_at is None:
             return "running"
-        return "killed" if (self.killed or record.timed_out) else "completed"
+        return "killed" if (self.killed or self.timed_out) else "completed"
 
 
 def _validate_max_runtime_seconds(value: object) -> None:
@@ -273,7 +189,7 @@ class DesktopShell:
         self._agent_input_idle.set()
         self._agent_input_ended_at = -math.inf
         self._used_ids: set[tuple[str, str]] = set()
-        self._records: dict[str, ProcessRecord] = {}
+        self._registry = ProcessRegistry()
         self._handles: dict[str, _ShellHandle] = {}
         self._directory: str | None = None
         self._busy = False
@@ -381,15 +297,14 @@ class DesktopShell:
         controller_key: str | None = None,
     ) -> list[dict[str, object]]:
         """List retained handles, optionally scoped to one requester, agent, and/or controller."""
-        self._prune()
+        self._sync_all_handles()
         entries: list[dict[str, object]] = []
         for handle, entry in self._handles.items():
             if requester_id is not None and (entry.requester_id, entry.agent_name) != (requester_id, agent_name):
                 continue
             if controller_key is not None and entry.controller_key != controller_key:
                 continue
-            record = self._records[handle]
-            ended_at = record.finished_at if record.finished_at is not None else time.monotonic()
+            ended_at = entry.finished_at if entry.finished_at is not None else time.monotonic()
             entries.append(
                 {
                     "handle": handle,
@@ -397,7 +312,7 @@ class DesktopShell:
                     "agent_name": entry.agent_name,
                     "command_preview": entry.command[:_COMMAND_PREVIEW_CHARS],
                     "elapsed_seconds": round(max(0.0, ended_at - entry.started_at), 1),
-                    "state": entry.state(record),
+                    "state": entry.state,
                 },
             )
         return entries
@@ -534,10 +449,12 @@ class DesktopShell:
         return deadline
 
     def _oldest_finished_handle(self) -> str | None:
-        self._prune()
+        self._sync_all_handles()
         if len(self._handles) < _MAX_HANDLES:
             return None
-        finished = [(record.finished_at or 0.0, handle) for handle, record in self._records.items() if record.finished]
+        finished = [
+            (entry.finished_at, handle) for handle, entry in self._handles.items() if entry.finished_at is not None
+        ]
         if not finished:
             message = "Too many local shell commands are running; kill one before starting another."
             raise DesktopShellError(message)
@@ -592,69 +509,87 @@ class DesktopShell:
     async def _run(self, request: DesktopShellRequest, inline_wait: float) -> DesktopShellResult:
         if request.max_runtime_seconds is not None:
             inline_wait = min(inline_wait, request.max_runtime_seconds)
-        output = DesktopShellOutput(self._spool_directory())
+        self._sync_all_handles()
+        spool = SpoolCapture(max_bytes=MAX_SHELL_OUTPUT_BYTES, directory=self._spool_directory())
+        transferred = False
         started_at = time.monotonic()
-        run = asyncio.create_task(
-            run_command(
-                self._records,
-                namespace=json.dumps([request.controller_key, request.requester_id, request.agent_name]),
-                argv=["/bin/sh", "-c", request.command],
-                env=self._environment,
-                cwd=request.cwd,
-                # The spool carries output; the engine's line tail is unused.
-                tail=0,
-                timeout=inline_wait,
-                output_capture=output,
-                stdin=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-                kill_group_after_exit=True,
-                # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
-                register_finished=True,
-                max_runtime_seconds=request.max_runtime_seconds,
-            ),
-        )
-        cancelled = asyncio.create_task(self._cancel_event.wait())
+        namespace = json.dumps([request.controller_key, request.requester_id, request.agent_name])
         try:
-            await asyncio.wait({run, cancelled}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            cancelled.cancel()
-            if not run.done():
-                run.cancel()
-                # The engine stops the process group within its bounded grace before this settles.
-                with suppress(asyncio.CancelledError):
-                    await run
-        if run.cancelled():
-            raise DesktopShellError(_STOPPED)
-        result = run.result()
-        self._prune()
-        if result.handle is None:
-            output.release()
-            raise DesktopShellError(result.message.removeprefix("Error: "))
-        if self._cancel_event.is_set():
-            # Revocation raced the new handle's registration and has already killed and forgotten it.
-            discard_background_record(self._records, result.handle)
-            if not output.completed:
-                output.release()
+            launch = (
+                self._registry.spawn_background
+                if inline_wait <= 0
+                else partial(self._registry.run_or_background, timeout=inline_wait)
+            )
+            run = asyncio.create_task(
+                launch(
+                    namespace=namespace,
+                    argv=["/bin/sh", "-c", request.command],
+                    env=self._environment,
+                    cwd=request.cwd,
+                    # The spool carries output; the engine's line tail is unused.
+                    tail=0,
+                    spool=spool,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                    kill_group_after_exit=True,
+                    max_runtime_seconds=request.max_runtime_seconds,
+                ),
+            )
+            cancelled = asyncio.create_task(self._cancel_event.wait())
+            try:
+                await asyncio.wait({run, cancelled}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                cancelled.cancel()
+                if not run.done():
+                    run.cancel()
+                    # The engine stops the process group within its bounded grace before this settles.
+                    with suppress(asyncio.CancelledError):
+                        await run
+            if run.cancelled():
                 raise DesktopShellError(_STOPPED)
-            return DesktopShellResult("completed", None, output.exit_code, output)
-        entry = _ShellHandle(
-            request.requester_id,
-            request.agent_name,
-            request.command,
-            started_at,
-            output,
-            controller_key=request.controller_key,
-            request_id=request.request_id,
-        )
-        self._handles[result.handle] = entry
-        record = self._records[result.handle]
-        return DesktopShellResult(
-            entry.state(record),
-            result.handle,
-            record.return_code,
-            output,
-            timed_out=record.finished and record.timed_out,
-        )
+            result = run.result()
+            if result.execution_error or result.background_rejected:
+                raise DesktopShellError(result.message.removeprefix("Error: "))
+            entry = _ShellHandle(
+                request.requester_id,
+                request.agent_name,
+                request.command,
+                started_at,
+                spool,
+                namespace,
+                controller_key=request.controller_key,
+                request_id=request.request_id,
+            )
+            if result.handle is None:
+                # Completed inline without registering a background record in ProcessRegistry.
+                transferred = True
+                if self._cancel_event.is_set():
+                    return DesktopShellResult("completed", None, result.return_code, spool)
+                handle = self._new_handle()
+                self._handles[handle] = replace(entry, finished_at=time.monotonic(), return_code=result.return_code)
+                return DesktopShellResult("completed", handle, result.return_code, spool)
+            record = self._registry.get_process(namespace, result.handle)
+            if self._cancel_event.is_set():
+                # Revocation raced the new handle's registration and has already killed and forgotten it.
+                self._registry.discard(result.handle)
+                if record is None or not record.finished:
+                    raise DesktopShellError(_STOPPED)
+                transferred = True
+                state: Literal["completed", "killed"] = "killed" if record.timed_out else "completed"
+                return DesktopShellResult(state, None, record.return_code, spool, timed_out=record.timed_out)
+            self._handles[result.handle] = entry
+            entry, _ = self._sync_handle(result.handle)
+            transferred = True
+            return DesktopShellResult(
+                entry.state,
+                result.handle,
+                entry.return_code,
+                spool,
+                timed_out=entry.finished_at is not None and entry.timed_out,
+            )
+        finally:
+            if not transferred:
+                spool.close()
 
     def check(
         self,
@@ -671,28 +606,21 @@ class DesktopShell:
         An invalid output ``offset`` or ``stderr_offset`` is rejected without changing the handle, so a corrected check
         still gets the output.
         """
-        record = self._caller_record(requester_id, agent_name, handle, controller_key=controller_key)
-        entry = self._handles[handle]
+        entry = self._caller_handle(requester_id, agent_name, handle, controller_key=controller_key)
         if offset is not None:
-            entry.output.check_offset(offset)
+            _check_stream_offset(entry.output.stdout, offset, label="output")
         if stderr_offset is not None:
-            entry.output.check_stderr_offset(stderr_offset)
-        if not record.finished:
+            _check_stream_offset(entry.output.stderr, stderr_offset, label="stderr")
+        if entry.finished_at is None:
             return DesktopShellResult("running", handle, None, entry.output)
-        return DesktopShellResult(
-            entry.state(record),
-            handle,
-            record.return_code,
-            entry.output,
-            timed_out=record.timed_out,
-        )
+        return DesktopShellResult(entry.state, handle, entry.return_code, entry.output, timed_out=entry.timed_out)
 
     def hand_over(self, result: DesktopShellResult) -> None:
         """Forget a finished result's handle and release its output once the rest of it reached the caller."""
         if result.handle is not None and result.handle in self._handles:
-            self._records.pop(result.handle, None)
+            self._registry.discard(result.handle)
             self._handles.pop(result.handle)
-        result.output.release()
+        result.output.close()
 
     def kill(
         self,
@@ -704,11 +632,8 @@ class DesktopShell:
         controller_key: str | None = None,
     ) -> Literal["killed", "completed"]:
         """Signal the caller's own running handle, keeping its output for a later check that reports it killed."""
-        return self._signal(
-            self._caller_record(requester_id, agent_name, handle, controller_key=controller_key),
-            handle,
-            force=force,
-        )
+        self._caller_handle(requester_id, agent_name, handle, controller_key=controller_key)
+        return self._signal(handle, force=force)
 
     def cancel_request(
         self,
@@ -758,35 +683,65 @@ class DesktopShell:
         ):
             self._cancel_event.set()
             return "killed"
-        self._prune()
+        self._sync_all_handles()
         for handle, entry in self._handles.items():
             if _matches(entry.request_id, entry.requester_id, entry.agent_name, entry.controller_key):
-                return self._signal(self._records[handle], handle, force=True)
+                return self._signal(handle, force=True)
         return "not_found"
 
     def kill_handle(self, handle: str) -> None:
         """Force-kill any caller's handle from the local management channel; its owner's check reports it killed."""
-        self._prune()
         if handle not in self._handles:
             raise DesktopShellError(_UNKNOWN_HANDLE)
-        self._signal(self._records[handle], handle, force=True)
+        self._signal(handle, force=True)
 
-    def _signal(self, record: ProcessRecord, handle: str, *, force: bool) -> Literal["killed", "completed"]:
+    def _new_handle(self) -> str:
+        while (handle := f"shell:{uuid.uuid4().hex[:8]}") in self._handles:
+            pass
+        return handle
+
+    def _sync_handle(self, handle: str) -> tuple[_ShellHandle, BackgroundProcess | None]:
+        entry = self._handles[handle]
+        if entry.finished_at is not None:
+            return entry, None
+        record = self._registry.get_process(entry.namespace, handle)
+        if record is None or not record.finished:
+            return entry, record
+        entry = replace(
+            entry,
+            finished_at=record.finished_at or time.monotonic(),
+            return_code=record.return_code,
+            timed_out=record.timed_out,
+        )
+        self._handles[handle] = entry
+        self._registry.discard(handle)
+        return entry, None
+
+    def _sync_all_handles(self) -> None:
+        for handle in list(self._handles):
+            self._sync_handle(handle)
+
+    def _signal(self, handle: str, *, force: bool) -> Literal["killed", "completed"]:
+        entry, record = self._sync_handle(handle)
         # Only a delivered signal makes the handle killed; a process that exited first ended on its own.
-        if record.process.returncode is None and signal_record(record, force=force):
-            self._handles[handle] = replace(self._handles[handle], killed=True)
+        if (
+            record is not None
+            and record.process.returncode is None
+            and self._registry.signal(entry.namespace, handle, force=force).outcome == "signalled"
+        ):
+            entry = replace(entry, killed=True)
+            self._handles[handle] = entry
         # An earlier kill stays the reason it ended, matching what the next check reports.
-        return "killed" if (self._handles[handle].killed or record.timed_out) else "completed"
+        return "killed" if (entry.killed or entry.timed_out) else "completed"
 
-    def _caller_record(
+    def _caller_handle(
         self,
         requester_id: str,
         agent_name: str,
         handle: str,
         *,
         controller_key: str | None = None,
-    ) -> ProcessRecord:
-        self._prune()
+    ) -> _ShellHandle:
         entry = self._handles.get(handle)
         if (
             entry is None
@@ -794,16 +749,12 @@ class DesktopShell:
             or (controller_key is not None and entry.controller_key != controller_key)
         ):
             raise DesktopShellError(_UNKNOWN_HANDLE)
-        return self._records[handle]
+        synced, _ = self._sync_handle(handle)
+        return synced
 
     def _discard(self, handle: str) -> None:
-        discard_background_record(self._records, handle)
-        self._handles.pop(handle).output.release()
-
-    def _prune(self) -> None:
-        # The engine drops finished records after ten minutes; release the output they left behind.
-        for handle in self._handles.keys() - self._records.keys():
-            self._handles.pop(handle).output.release()
+        self._registry.discard(handle)
+        self._handles.pop(handle).output.close()
 
     def _spool_directory(self) -> str:
         if self._directory is None:
@@ -821,9 +772,9 @@ class DesktopShell:
             self._cancel_event.set()
             if self._decision is not None and not self._decision.done():
                 self._decision.set_result("cancelled")
-            kill_all_records(self._records)
+            self._registry.kill_all()
             for entry in self._handles.values():
-                entry.output.release()
+                entry.output.close()
             self._handles.clear()
             return
         if not isinstance(controller_key, str) or not controller_key.strip():
