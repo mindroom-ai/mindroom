@@ -1104,6 +1104,18 @@ class ToolJobRuntime:
             cancel=spec.cancel,
         )
 
+    def _reattach_entry(
+        self,
+        existing: _Entry,
+        job: BackgroundJob,
+        owner: ToolExecutionIdentity,
+        depth: int,
+    ) -> tuple[_Entry, bool]:
+        entry, readable = self._check_waited_entry(existing, owner, depth)
+        if _ADMITTED_OPERATION(entry.job) != _ADMITTED_OPERATION(job):
+            raise JobAccessError(_UNAVAILABLE)
+        return entry, readable
+
     async def start(
         self,
         job_id: str,
@@ -1145,19 +1157,24 @@ class ToolJobRuntime:
                 reply_stop_order=reply_stop_order,
             )
             readable = True
-            existing = await self._find_exact_entry(job_id) if reattach else self._entries.get(job_id)
-            if reattach and existing is not None:
-                entry, readable = self._check_waited_entry(existing, owner, depth)
-                if _ADMITTED_OPERATION(entry.job) != _ADMITTED_OPERATION(job):
-                    raise JobAccessError(_UNAVAILABLE)
-            else:
-                if existing is not None:
+            existing = self._entries.get(job_id)
+            if existing is not None:
+                if not reattach:
                     msg = "Tool job already exists."
                     raise ToolJobExistsError(msg)
-                if not owner.session_id or depth < 0 or self._grant(job) != "allowed":
+                entry, readable = self._reattach_entry(existing, job, owner, depth)
+            elif not owner.session_id or depth < 0 or self._grant(job) != "allowed":
+                if not reattach or (cold := await self._find_exact_entry(job_id)) is None:
                     raise JobAccessError(_UNAVAILABLE)
+                entry, readable = self._reattach_entry(cold, job, owner, depth)
+            else:
                 entry = _Entry(job, cancel=cancel)
-                await run_coroutine_until_complete(self._admit(entry, operation, span_stopped))
+                try:
+                    await run_coroutine_until_complete(self._admit(entry, operation, span_stopped))
+                except ToolJobExistsError:
+                    if not reattach or (cold := await self._find_exact_entry(job_id)) is None:
+                        raise
+                    entry, readable = self._reattach_entry(cold, job, owner, depth)
             snapshot = await self._snapshot(entry)
             return snapshot, self._claim_waited_entry(entry, readable=readable, claim=None)
 
