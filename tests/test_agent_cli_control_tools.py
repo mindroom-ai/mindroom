@@ -301,13 +301,12 @@ async def test_hidden_delegation_uses_native_child_owner(
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
-    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
-
     owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=_output_policy(catalog),
+        run_child=child_response,
         delegation_depth=depth,
     )
     call_id = uuid4()
@@ -415,13 +414,12 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
-    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
-
     owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=_output_policy(catalog),
+        run_child=child_response,
     )
 
     async def checkpoint(parent):
@@ -485,12 +483,12 @@ async def test_a_cancel_while_a_delegation_awaits_approval_is_deferred(tmp_path,
         children.append(child)
         return await run_delegated_child_response(child, **kwargs)
 
-    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
     owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=_output_policy(catalog),
+        run_child=child_response,
     )
 
     async def checkpoint(parent):
@@ -550,12 +548,12 @@ async def test_a_delegated_child_never_reports_on_its_delegate_call_receipt(tmp_
         await asyncio.sleep(0)
         return await run_delegated_child_response(child, **kwargs)
 
-    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
     owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
         authorize=_allow,
         output_file_policy=_output_policy(catalog),
+        run_child=child_response,
     )
     call_id = uuid4()
     async with owner._window("bash-parent"):
@@ -662,13 +660,12 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 await asyncio.Event().wait()
             return await run_delegated_child_response(child, **kwargs)
 
-        monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
-
         owner = live_turn_tools_for_test(
             CliTurnOwner(identity, "turn", "run"),
             catalog=catalog,
             authorize=_allow,
             output_file_policy=_output_policy(catalog),
+            run_child=child_response,
         )
 
         async def checkpoint(parent):
@@ -690,6 +687,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                     refresh_scheduler=None,
                     approval_calls=None,
                     on_event=lambda _event: None,
+                    run_child=child_response,
                 )
             assert isinstance(paused, PausedAttempt)
             assert paused.cli_call is not None
@@ -754,6 +752,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                     tool_trace_collector=[],
                     refresh_scheduler=None,
                     authorize=authorize_binding,
+                    run_child=child_response,
                     progress=None,
                 )
             if mode == "recover_again":
@@ -947,6 +946,7 @@ async def test_a_waiting_delegation_whose_function_no_longer_delegates_is_refuse
             refresh_scheduler=None,
             approval_calls=None,
             on_event=lambda _event: None,
+            run_child=run_delegated_child_response,
         )
 
 

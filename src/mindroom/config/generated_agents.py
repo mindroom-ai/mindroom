@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.resolution import authored_tool_entries
+from mindroom.config.slack import drop_slack_room
 from mindroom.constants import RESERVED_ENTITY_NAMES
-from mindroom.integrations import adapt_created_agent_tools
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -77,9 +77,9 @@ def _generated_agent_data(
             "allow_self_config": False,
             "created_agents_per_owner": 0,
         }
-        # A created agent has no rooms, so each integration removes the tool settings that need one.
+        # A created agent has no rooms, so it keeps the creator's Slack channels to read but never answers mentions.
         if "tools" in data:
-            adapt_created_agent_tools(data["tools"])
+            drop_slack_room(data["tools"])
     return data, dropped
 
 

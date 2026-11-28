@@ -28,6 +28,7 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
     approval_executor,
+    default_delegation_executor,
     native_delegation_config,
     pause_parent,
     respond,
@@ -88,6 +89,7 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),
         execution_identity=identity,
+        delegation_executor=default_delegation_executor(),
     )
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
@@ -172,6 +174,7 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),
             execution_identity=identity,
+            delegation_executor=default_delegation_executor(),
         )
         operation = toolkit.run_subagent(agent_name="child", task="Inspect")
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):

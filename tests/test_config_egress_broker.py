@@ -8,8 +8,8 @@ from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
+from mindroom.config.egress_presets import EGRESS_PRESETS
 from mindroom.config.main import Config
-from mindroom.egress_broker.presets import EGRESS_PRESETS
 
 
 def test_example_config_loads() -> None:

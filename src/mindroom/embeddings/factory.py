@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import runtime_env_path
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_embedder_api_key, get_ollama_api_key, get_ollama_host, get_openai_base_url
-from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
+from mindroom.embeddings.health_state import capture_embedder_health_recorder
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 from mindroom.providers.google_adc import load_google_application_credentials
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder
-    from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
+    from mindroom.embeddings.health_state import EmbedderHealthRecorder
 
 
 @dataclass(frozen=True, slots=True)

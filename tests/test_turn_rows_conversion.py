@@ -28,7 +28,7 @@ from mindroom.event_journal import (
     upgrades,
 )
 from mindroom.event_journal.identity import journal_principal_id
-from mindroom.event_journal.legacy_turn_rows import (
+from mindroom.event_journal.legacy_ledger import (
     import_legacy_ledger_file,
     legacy_summary_sources,
 )

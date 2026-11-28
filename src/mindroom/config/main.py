@@ -111,7 +111,7 @@ from mindroom.config.resolution import (
 )
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
-from mindroom.config.slack import SlackConfig
+from mindroom.config.slack import SlackConfig, validate_slack_agents
 from mindroom.config.tailnet_ssh import TailnetSshConfig
 from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.config.validation import TimezoneName  # noqa: TC001
@@ -143,9 +143,6 @@ from mindroom.entity_resolution import (
 )
 from mindroom.file_locks import advisory_file_lock
 from mindroom.git_urls import credential_free_repo_url
-
-# config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
-from mindroom.integrations import validate_integrations
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix_identifiers import (
@@ -825,9 +822,9 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_integration_config(self) -> Config:
-        """Run each built-in integration's own config checks."""
-        validate_integrations(self)
+    def validate_slack_config(self) -> Config:
+        """Check each agent's Slack `channels` and `room`, and that every channel has at most one answering agent."""
+        validate_slack_agents(self)
         return self
 
     @model_validator(mode="after")

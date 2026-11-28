@@ -19,7 +19,8 @@ from mindroom.config.models import ModelConfig
 from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
 from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
-from mindroom.knowledge_graph.store import _GraphLoop, run_on_loop
+from mindroom.knowledge_graph.async_support import run_on_loop
+from mindroom.knowledge_graph.store import _GraphLoop
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.llm.request_context import bind_request_headers

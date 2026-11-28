@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec, RunContext
+    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRecord
@@ -197,6 +198,7 @@ def bind_minimal_owner(
     context_documents: Mapping[str, str],
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    run_child: ChildResponseRunner | None = None,
 ) -> LiveTurnTools:
     """Bind the real managed turn to ``catalog``: its owner and grant on the first attempt, its catalog afterwards."""
     lifetime = current_cli_lifetime()
@@ -213,6 +215,7 @@ def bind_minimal_owner(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         reload_ends_run=True,
+        run_child=run_child,
     )
 
 
@@ -227,6 +230,7 @@ async def minimal_attempt(
     context_documents: Mapping[str, str],
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    run_child: ChildResponseRunner | None = None,
 ) -> tuple[AgentSpec, LoopHooks]:
     """Bind the attempt's CLI owner, then return the spec and hooks of a run that offers only its Bash facade.
 
@@ -253,6 +257,7 @@ async def minimal_attempt(
             context_documents=context_documents,
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
+            run_child=run_child,
         )
     except BaseException as exc:
         await catalog.close()

@@ -47,7 +47,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.integrations"
-depends_on = ["mindroom.slack.integration"]
+depends_on = ["mindroom.api.slack_events", "mindroom.slack.integration"]
 
 [[modules]]
 path = "mindroom.origins"
@@ -56,13 +56,15 @@ depends_on = []
 [[modules]]
 path = "mindroom.embeddings.factory"
 depends_on = [
-    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.health_state",
     "mindroom.embeddings.ollama_embedder",
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.sentence_transformers_embedder",
     "mindroom.embeddings.vertex_ai_embedder",
     "mindroom.constants",
     "mindroom.providers.google_adc",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.sync",
 ]
 
 [[modules]]
@@ -91,9 +93,21 @@ path = "mindroom.embeddings.embedder_health"
 depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
+    "mindroom.embeddings.health_state",
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.vertex_ai_embedder",
     "mindroom.config.resolution",
+]
+
+[[modules]]
+path = "mindroom.embeddings.health_state"
+depends_on = []
+visibility = [
+    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.factory",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_scheduler",
+    "mindroom.memory._mem0_backend",
 ]
 
 [[modules]]
@@ -246,7 +260,6 @@ expose = [
 path = "mindroom.agent_cli.delegation"
 depends_on = [
     "mindroom.agent_cli.approval",
-    "mindroom.ai",
     "mindroom.delegation.execution",
     "mindroom.delegation.state",
     "mindroom.event_journal",
@@ -320,6 +333,7 @@ visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.response_turn",
     "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
 ]
 
 [[interfaces]]
@@ -482,7 +496,7 @@ depends_on = [
 visibility = [
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.minimal_mode_preflight",
-    "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
 ]
 
 [[interfaces]]
@@ -498,7 +512,7 @@ depends_on = []
 visibility = [
     "mindroom.config.main",
     "mindroom.agent_cli.bash",
-    "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
     "mindroom.agent_cli.client",
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
@@ -513,6 +527,7 @@ visibility = [
     "mindroom.tool_system.tool_environment",
     "mindroom.shell.output_capture",
     "mindroom.shell.policy",
+    "mindroom.custom_tools.terminal",
 ]
 
 [[interfaces]]
@@ -534,8 +549,6 @@ path = "mindroom.event_journal"
 depends_on = [
     "mindroom.constants",
     "mindroom.event_journal.history_recovery",
-    "mindroom.event_journal.legacy_response_attempts",
-    "mindroom.event_journal.legacy_turn_rows",
     "mindroom.response_sources",
     "mindroom.history.types",
     "mindroom.interactive_models",
@@ -561,8 +574,7 @@ visibility = [
     "mindroom.bot",
     "mindroom.delegation.job_approvals",
     "mindroom.delivery_gateway",
-    "mindroom.event_journal.legacy_response_attempts",
-    "mindroom.event_journal.legacy_turn_rows",
+    "mindroom.event_journal.legacy_ledger",
     "mindroom.event_journal.matrix_delivery",
     "mindroom.event_journal.opening",
     "mindroom.journal_dispatch",
@@ -754,7 +766,8 @@ visibility = [
     "mindroom.reactive_triggers.service",
     "mindroom.room_activity.note",
     "mindroom.thread_export.projected_history",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.automatic",
+    "mindroom.thread_summary.state",
 ]
 
 [[modules]]
@@ -938,7 +951,7 @@ path = "mindroom.agents"
 depends_on = [
     "mindroom.preload_cap",
     "mindroom.knowledge.search",
-    "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
     "mindroom.delegation.personas",
     "mindroom.delegation.state",
     "mindroom.path_confinement",
@@ -982,6 +995,8 @@ depends_on = [
     "mindroom.config.models",
     "mindroom.config.resolution",
     "mindroom.desktop.credentials",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tools.filesystem",
 ]
 
 [[modules]]
@@ -1008,7 +1023,6 @@ depends_on = [
 path = "mindroom.session_storage.agent_storage"
 depends_on = [
     "mindroom.history.types",
-    "mindroom.llm",
     "mindroom.runtime_resolution",
     "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.session_storage.legacy_session_columns",
@@ -1020,7 +1034,6 @@ visibility = [
     "mindroom.helper_usage",
     "mindroom.approval.execution",
     "mindroom.history.session_context",
-    "mindroom.history.storage",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.memory.auto_flush",
     "mindroom.delegation.execution",
@@ -1051,15 +1064,17 @@ visibility = [
     "mindroom.memory._mem0_backend",
     "mindroom.approval.execution",
     "mindroom.teams",
+    "mindroom.teams.formation",
     "mindroom.routing",
     "mindroom.topic_generator",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.generation",
     "mindroom.voice.handler",
     "mindroom.skill_learning.reviewer",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge.chunk_context",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.custom_tools.claude_agent",
 ]
 
 [[modules]]
@@ -1155,7 +1170,6 @@ path = "mindroom.session_storage.legacy_agno3_conversion"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.legacy_stored_tool_calls",
-    "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.session_storage.codec",
@@ -1221,6 +1235,7 @@ expose = [
     "persist_to",
     "report_created_row",
     "runs_without",
+    "save_compaction_usage",
     "seen_event_ids",
     "set_visible_messages",
     "source_event_ids",
@@ -1289,6 +1304,9 @@ depends_on = [
     "mindroom.config.models",
     "mindroom.config.schema_hints",
     "mindroom.constants",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.manager",
+    "mindroom.credentials.sync",
     "mindroom.providers.names",
 ]
 visibility = [
@@ -1394,6 +1412,7 @@ depends_on = [
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.execution",
+    "mindroom.delegation.state",
     "mindroom.history.session_context",
     "mindroom.llm",
     "mindroom.reply_scope",
@@ -1469,6 +1488,7 @@ path = "mindroom.approval.tool_owners"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
     "mindroom.approval.tool_approval",
+    "mindroom.credentials.manager",
     "mindroom.desktop.credentials",
     "mindroom.mcp.toolkit",
     "mindroom.runtime_resolution",
@@ -1549,6 +1569,7 @@ depends_on = [
     "mindroom.response_turn",
     "mindroom.streaming",
     "mindroom.teams",
+    "mindroom.teams.spec",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.interactive",
@@ -1612,11 +1633,498 @@ visibility = [
     "mindroom.custom_tools.temporary_secrets",
     "mindroom.custom_tools.email_invite",
     "mindroom.reactive_triggers.script_check",
+    "mindroom.custom_tools.terminal",
+]
+
+[[modules]]
+path = "mindroom.credentials"
+depends_on = []
+visibility = []
+
+[[modules]]
+path = "mindroom.credentials.environment"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.credentials.policy",
+    "mindroom.credentials.service_names",
+]
+visibility = [
+    "mindroom.cli.doctor",
+    "mindroom.cli.setup_detection",
+    "mindroom.cli.setup_wizard",
+    "mindroom.credentials.manager",
+    "mindroom.credentials.sync",
+    "mindroom.custom_tools.matrix_voice_message",
+    "mindroom.embeddings.factory",
+    "mindroom.judgment.evaluator",
+    "mindroom.knowledge.rerank",
+    "mindroom.memory.config",
+    "mindroom.providers.anthropic.messages",
+    "mindroom.providers.credentials",
+    "mindroom.providers.gemini",
+    "mindroom.providers.openai",
+    "mindroom.reactive_triggers.external_sources",
+    "mindroom.usage.provider_accounts",
+]
+
+[[interfaces]]
+from = ["mindroom.credentials.environment"]
+expose = [
+    "EMBEDDER_CREDENTIAL_SERVICE",
+    "declared_credentials",
+    "get_secret_from_env",
+]
+
+[[modules]]
+path = "mindroom.credentials.legacy_env_credentials"
+depends_on = []
+visibility = ["mindroom.credentials.manager"]
+
+[[interfaces]]
+from = ["mindroom.credentials.legacy_env_credentials"]
+expose = ["remove_environment_copies"]
+
+[[modules]]
+path = "mindroom.credentials.manager"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.legacy_env_credentials",
+    "mindroom.credentials.policy",
+    "mindroom.credentials.service_names",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.api.connections",
+    "mindroom.api.credentials",
+    "mindroom.api.credentials_target",
+    "mindroom.api.egress_credentials",
+    "mindroom.api.egress_status",
+    "mindroom.api.github_requests",
+    "mindroom.api.oauth",
+    "mindroom.api.room_triggers",
+    "mindroom.api.sandbox_runner",
+    "mindroom.api.slack_events",
+    "mindroom.api.tools",
+    "mindroom.approval.tool_owners",
+    "mindroom.cli.doctor",
+    "mindroom.commands.desktop_commands",
+    "mindroom.config.main",
+    "mindroom.config.models",
+    "mindroom.config.validation",
+    "mindroom.credentials.legacy_tool_credentials",
+    "mindroom.credentials.sync",
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.browser",
+    "mindroom.custom_tools.desktop",
+    "mindroom.custom_tools.egress_credentials",
+    "mindroom.custom_tools.github",
+    "mindroom.custom_tools.gmail",
+    "mindroom.custom_tools.google_bigquery",
+    "mindroom.custom_tools.google_docs",
+    "mindroom.custom_tools.google_drive",
+    "mindroom.custom_tools.google_tasks",
+    "mindroom.custom_tools.homeassistant",
+    "mindroom.custom_tools.microsoft_files",
+    "mindroom.custom_tools.microsoft_meetings",
+    "mindroom.custom_tools.microsoft_onenote",
+    "mindroom.custom_tools.microsoft_people",
+    "mindroom.custom_tools.microsoft_sharepoint",
+    "mindroom.custom_tools.microsoft_teams",
+    "mindroom.custom_tools.microsoft_todo",
+    "mindroom.custom_tools.outlook_calendar",
+    "mindroom.custom_tools.outlook_mail",
+    "mindroom.custom_tools.slack",
+    "mindroom.custom_tools.spotify",
+    "mindroom.custom_tools.triggers",
+    "mindroom.desktop.credentials",
+    "mindroom.desktop.pairing_receiver",
+    "mindroom.egress_broker",
+    "mindroom.github_client",
+    "mindroom.knowledge.git_source",
+    "mindroom.knowledge.refresh_policy",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.mcp.manager",
+    "mindroom.mcp_gateway.toolkits",
+    "mindroom.oauth.credential_store",
+    "mindroom.oauth.discovery",
+    "mindroom.oauth.google",
+    "mindroom.oauth.legacy_requester_bindings",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.reset",
+    "mindroom.oauth.service",
+    "mindroom.plugin_http",
+    "mindroom.providers.credentials",
+    "mindroom.reactive_triggers.github_pr",
+    "mindroom.slack.event_source",
+    "mindroom.slack.integration",
+    "mindroom.slack.oauth",
+    "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.skills",
+    "mindroom.tool_system.toolkit_builder",
+    "mindroom.tool_system.worker_proxy_client",
+]
+
+[[interfaces]]
+from = ["mindroom.credentials.manager"]
+expose = [
+    "CredentialsManager",
+    "CredentialsUnreadableError",
+    "SERVICE_NAME_CHARACTERS",
+    "SERVICE_NAME_PATTERN",
+    "credential_layers",
+    "delete_scoped_credentials",
+    "get_runtime_credentials_manager",
+    "get_runtime_shared_credentials_manager",
+    "load_scoped_credentials",
+    "remove_worker_service_credentials",
+    "save_scoped_credentials",
+    "scoped_credentials_path",
+    "update_stored_service_credentials",
+    "validate_service_name",
+]
+
+[[modules]]
+path = "mindroom.credentials.service_names"
+depends_on = []
+visibility = [
+    "mindroom.credentials.environment",
+    "mindroom.credentials.manager",
+]
+
+[[interfaces]]
+from = ["mindroom.credentials.service_names"]
+expose = [
+    "SERVICE_NAME_CHARACTERS",
+    "SERVICE_NAME_PATTERN",
+    "validate_service_name",
+]
+
+[[modules]]
+path = "mindroom.credentials.sync"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.manager",
+    "mindroom.providers.names",
+]
+visibility = [
+    "mindroom.api.credentials",
+    "mindroom.cli.doctor",
+    "mindroom.embeddings.factory",
+    "mindroom.judgment.evaluator",
+    "mindroom.knowledge.rerank",
+    "mindroom.matrix_rtc.call_backends",
+    "mindroom.memory.config",
+    "mindroom.providers.credentials",
+    "mindroom.providers.ollama.adapter",
+    "mindroom.usage.provider_accounts",
+    "mindroom.voice.handler",
+]
+
+[[interfaces]]
+from = ["mindroom.credentials.sync"]
+expose = [
+    "canonical_provider_service",
+    "get_api_key_for_provider",
+    "get_api_key_for_service",
+    "get_embedder_api_key",
+    "get_ollama_api_key",
+    "get_ollama_host",
+    "get_openai_base_url",
+    "provider_key_with_source",
+    "resolve_provider_service_api_key",
 ]
 
 [[modules]]
 path = "mindroom.credentials.policy"
 depends_on = []
+
+# Hold oauth.registry out of Tach to avoid a cycle with tool_system.plugins.
+# Leave the package undeclared so that the hold is not governed via its parent.
+
+[[modules]]
+path = "mindroom.oauth.atlassian"
+depends_on = ["mindroom.oauth.providers"]
+visibility = [
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.atlassian_client",
+    "mindroom.tool_system.atlassian_connections",
+]
+
+[[interfaces]]
+from = ["mindroom.oauth.atlassian"]
+expose = [
+    "ATLASSIAN_PRODUCTS",
+    "AtlassianProduct",
+    "atlassian_function_names",
+    "atlassian_oauth_provider",
+    "atlassian_product_scopes",
+    "normalize_cloud_id",
+    "normalize_site_url",
+]
+
+[[modules]]
+path = "mindroom.oauth.client"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
+    "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.runtime_context",
+]
+visibility = [
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.github",
+    "mindroom.custom_tools.google_service",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.custom_tools.slack",
+    "mindroom.custom_tools.spotify",
+]
+
+[[interfaces]]
+from = ["mindroom.oauth.client"]
+expose = [
+    "ScopedOAuthClientMixin",
+    "active_oauth_credential_context",
+]
+
+[[modules]]
+path = "mindroom.oauth.discovery"
+depends_on = [
+    "mindroom.credentials.manager",
+    "mindroom.credentials.policy",
+    "mindroom.oauth.providers",
+    "mindroom.origins",
+]
+visibility = ["mindroom.api.oauth"]
+
+[[interfaces]]
+from = ["mindroom.oauth.discovery"]
+expose = ["client_id_metadata_document"]
+
+[[modules]]
+path = "mindroom.oauth.github"
+depends_on = ["mindroom.oauth.providers"]
+visibility = [
+    "mindroom.custom_tools.github",
+    "mindroom.github_client",
+]
+
+[[interfaces]]
+from = ["mindroom.oauth.github"]
+expose = ["github_oauth_provider"]
+
+[[modules]]
+path = "mindroom.oauth.google"
+depends_on = [
+    "mindroom.credentials.manager",
+    "mindroom.matrix.provisioning_env",
+    "mindroom.oauth.providers",
+]
+visibility = [
+    "mindroom.api.oauth",
+    "mindroom.custom_tools.gmail",
+    "mindroom.custom_tools.google_bigquery",
+    "mindroom.custom_tools.google_calendar",
+    "mindroom.custom_tools.google_docs",
+    "mindroom.custom_tools.google_drive",
+    "mindroom.custom_tools.google_service",
+    "mindroom.custom_tools.google_sheets",
+    "mindroom.custom_tools.google_tasks",
+    "mindroom.plugin_api",
+    "mindroom.tool_system.google_workspaces",
+]
+
+[[interfaces]]
+from = ["mindroom.oauth.google"]
+expose = [
+    "GOOGLE_DRIVE_READ_OAUTH_SCOPES",
+    "GOOGLE_DRIVE_WRITE_SCOPE",
+    "google_cloud_oauth_provider",
+    "google_oauth_provider",
+    "google_oauth_providers",
+    "google_service_scopes",
+    "with_google_account_picker",
+]
+
+[[modules]]
+path = "mindroom.oauth.legacy_spotify_credentials"
+depends_on = ["mindroom.oauth.providers"]
+visibility = ["mindroom.oauth.spotify"]
+
+[[interfaces]]
+from = ["mindroom.oauth.legacy_spotify_credentials"]
+expose = ["LEGACY_SPOTIFY_CREDENTIALS"]
+
+[[modules]]
+path = "mindroom.oauth.microsoft"
+depends_on = ["mindroom.oauth.providers"]
+visibility = ["mindroom.custom_tools.microsoft_graph"]
+
+[[interfaces]]
+from = ["mindroom.oauth.microsoft"]
+expose = ["microsoft_oauth_provider", "microsoft_token_url"]
+
+[[modules]]
+path = "mindroom.oauth.providers"
+depends_on = [
+    "mindroom.credentials.manager",
+    "mindroom.credentials.policy",
+    "mindroom.origins",
+]
+visibility = [
+    "mindroom.api.connections_native",
+    "mindroom.api.credentials_oauth_flows",
+    "mindroom.api.github_requests",
+    "mindroom.api.oauth",
+    "mindroom.api.sandbox_runner",
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.github",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.custom_tools.slack",
+    "mindroom.custom_tools.spotify",
+    "mindroom.custom_tools.triggers",
+    "mindroom.egress_broker",
+    "mindroom.github_client",
+    "mindroom.mcp.manager",
+    "mindroom.mcp.toolkit",
+    "mindroom.mcp_gateway.tools",
+    "mindroom.oauth.atlassian",
+    "mindroom.oauth.client",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.credential_store",
+    "mindroom.oauth.discovery",
+    "mindroom.oauth.github",
+    "mindroom.oauth.google",
+    "mindroom.oauth.legacy_spotify_credentials",
+    "mindroom.oauth.microsoft",
+    "mindroom.oauth.reset_execution",
+    "mindroom.oauth.service",
+    "mindroom.oauth.spotify",
+    "mindroom.oauth.state",
+    "mindroom.plugin_api",
+    "mindroom.plugin_http",
+    "mindroom.reactive_triggers.github_pr",
+    "mindroom.slack.oauth",
+    "mindroom.tool_system.google_workspaces",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.tool_hooks",
+]
+
+[[interfaces]]
+from = ["mindroom.oauth.providers"]
+expose = [
+    "OAuthCallbackRefusedError",
+    "OAuthClaimValidationError",
+    "OAuthClientConfig",
+    "OAuthClientConfigResolution",
+    "OAuthConnectionRequired",
+    "OAuthConsentGroup",
+    "OAuthLegacyCredentials",
+    "OAuthProvider",
+    "OAuthProviderError",
+    "OAuthRefreshRejectedError",
+    "OAuthRuntimeEndpoints",
+    "OAuthTokenEndpointChangedError",
+    "OAuthTokenResponseBodyError",
+    "OAuthTokenResult",
+    "OAuthUserFacingError",
+    "RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY",
+    "is_oauth_connection_required_result",
+    "is_oauth_loopback_hostname",
+    "is_terminal_oauth_refresh_error_code",
+    "is_valid_hosted_oauth_callback_for_request",
+    "oauth_connect_url_requires_host_browser",
+    "oauth_connection_required_payload",
+    "oauth_consent_group_provider",
+    "oauth_expires_at_from_response",
+    "token_endpoint_origin",
+]
+
+[[modules]]
+path = "mindroom.oauth.service"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.credential_binding",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.state",
+    "mindroom.origins",
+]
+visibility = [
+    "mindroom.api.connections",
+    "mindroom.api.connections_contacts",
+    "mindroom.api.egress_status",
+    "mindroom.api.oauth",
+    "mindroom.api.tools",
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.github",
+    "mindroom.custom_tools.google_drive",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.custom_tools.slack",
+    "mindroom.custom_tools.spotify",
+    "mindroom.egress_broker",
+    "mindroom.mcp.manager",
+    "mindroom.oauth.client",
+    "mindroom.oauth.reset",
+    "mindroom.plugin_api",
+    "mindroom.plugin_http",
+    "mindroom.slack.event_source",
+]
+
+[[interfaces]]
+from = ["mindroom.oauth.service"]
+expose = [
+    "OAUTH_ACCESS_REJECTED_REASON",
+    "OAUTH_MISSING_WRITE_SCOPE_REASON",
+    "OAUTH_REFRESH_REJECTED_REASON",
+    "OAUTH_RESET_REQUIRED_REASON",
+    "OAuthConnectTarget",
+    "build_oauth_connect_instruction",
+    "consume_oauth_connect_token",
+    "current_oauth_access_token",
+    "lookup_oauth_connect_token",
+    "oauth_connect_url",
+    "oauth_connection_required",
+    "oauth_provider_service_account_configured",
+    "oauth_public_base_url",
+    "oauth_success_redirect_url",
+]
+
+[[modules]]
+path = "mindroom.oauth.spotify"
+depends_on = [
+    "mindroom.oauth.legacy_spotify_credentials",
+    "mindroom.oauth.providers",
+]
+visibility = ["mindroom.custom_tools.spotify"]
+
+[[interfaces]]
+from = ["mindroom.oauth.spotify"]
+expose = ["spotify_oauth_provider"]
+
+[[modules]]
+path = "mindroom.oauth.state"
+depends_on = ["mindroom.oauth.providers"]
+visibility = [
+    "mindroom.api.connections_native",
+    "mindroom.api.credentials_oauth_flows",
+    "mindroom.oauth.reset",
+    "mindroom.oauth.service",
+]
+
+[[interfaces]]
+from = ["mindroom.oauth.state"]
+expose = [
+    "consume_opaque_oauth_state",
+    "issue_opaque_oauth_state",
+    "read_opaque_oauth_state",
+]
 
 [[modules]]
 path = "mindroom.oauth.credential_binding"
@@ -1624,18 +2132,22 @@ depends_on = []
 visibility = [
     "mindroom.api.oauth",
     "mindroom.oauth.reset",
+    "mindroom.oauth.service",
 ]
 
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.oauth.legacy_requester_bindings",
+    "mindroom.oauth.providers",
 ]
 visibility = ["mindroom.oauth.credential_lifecycle"]
 
 [[modules]]
 path = "mindroom.oauth.legacy_requester_bindings"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.credentials.policy",
     "mindroom.tool_system.worker_routing",
 ]
@@ -1650,6 +2162,7 @@ visibility = []
 path = "mindroom.oauth.credential_lifecycle"
 depends_on = [
     "mindroom.oauth.credential_store",
+    "mindroom.oauth.providers",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
@@ -1658,11 +2171,16 @@ visibility = [
     "mindroom.api.github_requests",
     "mindroom.api.oauth",
     "mindroom.api.tools",
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.github",
+    "mindroom.custom_tools.google_drive",
     "mindroom.egress_broker",
     "mindroom.github_client",
     "mindroom.mcp.manager",
+    "mindroom.oauth.client",
     "mindroom.oauth.reset",
     "mindroom.oauth.reset_execution",
+    "mindroom.oauth.service",
     "mindroom.plugin_http",
     "mindroom.slack.event_source",
 ]
@@ -1670,14 +2188,18 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.reset"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.oauth.credential_binding",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.service",
+    "mindroom.oauth.state",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
 ]
 visibility = [
     "mindroom.api.oauth",
+    "mindroom.custom_tools.oauth_connections",
 ]
 
 [[modules]]
@@ -1685,6 +2207,7 @@ path = "mindroom.oauth.reset_execution"
 depends_on = [
     "mindroom.mcp.errors",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.providers",
 ]
 visibility = ["mindroom.api.oauth"]
 
@@ -1725,9 +2248,7 @@ path = "mindroom.custom_tools.delegate"
 depends_on = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.agent_descriptions",
-    "mindroom.ai",
     "mindroom.delegation.direct",
-    "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
     "mindroom.delegation.sessions",
@@ -1745,6 +2266,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.report_publishing"
 depends_on = [
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.origins",
     "mindroom.report_publishing",
     "mindroom.tool_system.authoring",
@@ -1755,7 +2277,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.desktop"
 depends_on = [
+    "mindroom.credentials.manager",
+    "mindroom.custom_tools.desktop_attachment",
     "mindroom.custom_tools.desktop_shell",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.desktop.client",
     "mindroom.desktop.configuration",
     "mindroom.desktop.credentials",
@@ -1842,9 +2367,13 @@ depends_on = []
 visibility = ["mindroom.api.main", "mindroom.api.plugin_origins"]
 
 [[modules]]
-path = "mindroom.api.validation_errors"
+path = "mindroom.http_validation"
 depends_on = []
-visibility = ["mindroom.api.main", "mindroom.api.sandbox_runner_app", "mindroom.tool_system.plugins"]
+visibility = [
+    "mindroom.api.main",
+    "mindroom.api.sandbox_runner_app",
+    "mindroom.tool_system.plugins",
+]
 
 [[modules]]
 path = "mindroom.api.frontend"
@@ -1872,7 +2401,10 @@ depends_on = [
     "mindroom.api.connection_agents",
     "mindroom.api.oauth",
     "mindroom.config.egress_broker",
+    "mindroom.config.egress_presets",
+    "mindroom.credentials.manager",
     "mindroom.egress_broker",
+    "mindroom.oauth.service",
 ]
 
 [[modules]]
@@ -1895,6 +2427,7 @@ path = "mindroom.api.slack_events"
 depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.bounded_bytes",
+    "mindroom.credentials.manager",
     "mindroom.slack.app",
     "mindroom.slack.delivery",
     "mindroom.slack.events",
@@ -1957,6 +2490,7 @@ depends_on = [
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_worker",
     "mindroom.knowledge.status",
 ]
 
@@ -1996,6 +2530,8 @@ depends_on = [
     "mindroom.routing",
     "mindroom.run_storage",
     "mindroom.teams",
+    "mindroom.teams.runtime",
+    "mindroom.teams.spec",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
@@ -2030,6 +2566,8 @@ depends_on = [
     "mindroom.oauth.credential_lifecycle",
     "mindroom.egress_broker",
     "mindroom.tool_system.plugins",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.service",
     "mindroom.matrix.media",
 ]
 
@@ -2043,6 +2581,7 @@ depends_on = [
     "mindroom.contacts.parties",
     "mindroom.contacts.store",
     "mindroom.contacts.turns",
+    "mindroom.oauth.service",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.plugins",
 ]
@@ -2055,6 +2594,8 @@ depends_on = [
     "mindroom.api.connections_session",
     "mindroom.api.connections_session_cookie",
     "mindroom.matrix_openid",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.state",
     "mindroom.origins",
 ]
 
@@ -2093,10 +2634,12 @@ depends_on = [
     "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.config.egress_broker",
+    "mindroom.config.egress_presets",
     "mindroom.config.main",
     "mindroom.egress_broker",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.plugins",
+    "mindroom.credentials.manager",
 ]
 
 [[modules]]
@@ -2115,12 +2658,20 @@ depends_on = [
     "mindroom.origins",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.discovery",
+    "mindroom.oauth.google",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
 ]
 
 [[modules]]
 path = "mindroom.github_client"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.github",
+    "mindroom.oauth.providers",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -2129,17 +2680,29 @@ path = "mindroom.api.github_requests"
 depends_on = [
     "mindroom.api.client_sessions",
     "mindroom.api.config_lifecycle",
+    "mindroom.credentials.manager",
     "mindroom.github_client",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.providers",
 ]
 
 [[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
+    "mindroom.api.listener",
     "mindroom.api.agent_cli",
     "mindroom.api.workflow_gateway",
     "mindroom.bounded_bytes",
     "mindroom.json_utils",
+]
+
+[[modules]]
+path = "mindroom.api.listener"
+depends_on = []
+visibility = [
+    "mindroom.api.plugin_origins",
+    "mindroom.api.script_gateway",
+    "mindroom.api.tailnet_ssh_gateway",
 ]
 
 [[modules]]
@@ -2208,7 +2771,7 @@ depends_on = [
     "mindroom.integrations",
     "mindroom.api.usage",
     "mindroom.api.usage_export",
-    "mindroom.api.validation_errors",
+    "mindroom.http_validation",
     "mindroom.api.workers",
     "mindroom.api.workspace_files",
     "mindroom.call_transcripts",
@@ -2258,6 +2821,7 @@ depends_on = [
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.script_check",
     "mindroom.reactive_triggers.store",
+    "mindroom.credentials.manager",
 ]
 
 [[modules]]
@@ -2300,7 +2864,9 @@ depends_on = [
     "mindroom.api.credential_responses",
     "mindroom.api.credentials_oauth_policy",
     "mindroom.api.credentials_target",
+    "mindroom.credentials.manager",
     "mindroom.credentials.policy",
+    "mindroom.credentials.sync",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.factory",
     "mindroom.tool_system.worker_routing",
@@ -2328,6 +2894,8 @@ depends_on = [
     "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.api.dashboard_credential_scope",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.state",
 ]
 
 [[modules]]
@@ -2348,6 +2916,7 @@ depends_on = [
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.plugins",
+    "mindroom.credentials.manager",
 ]
 
 [[modules]]
@@ -2373,6 +2942,8 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.plugins",
     "mindroom.mcp.registry",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.service",
 ]
 
 [[modules]]
@@ -2439,6 +3010,8 @@ depends_on = [
     "mindroom.tools.browser_mcp",
     "mindroom.worker_computer.mcp_catalog",
     "mindroom.worker_computer.protocol",
+    "mindroom.custom_tools.browser",
+    "mindroom.tools.browser",
 ]
 visibility = ["mindroom.api.sandbox_runner"]
 
@@ -2485,6 +3058,8 @@ depends_on = [
     "mindroom.shell.registry",
     "mindroom.shell.streaming",
     "mindroom.shell.supervisor",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.providers",
     "mindroom.config.plugin",
 ]
 
@@ -2499,7 +3074,7 @@ depends_on = [
     "mindroom.worker_computer.runtime",
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_runner_scripts",
-    "mindroom.api.validation_errors",
+    "mindroom.http_validation",
     "mindroom.api.worker_preview",
     "mindroom.api.worker_services",
     "mindroom.api.worker_ssh",
@@ -2981,6 +3556,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tools.native_helpers",
     "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
@@ -3128,6 +3704,7 @@ path = "mindroom.custom_tools.attachments"
 depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.file_access",
     "mindroom.llm",
     "mindroom.matrix.client_delivery",
@@ -3148,6 +3725,7 @@ depends_on = [
 path = "mindroom.custom_tools.chat_ui"
 depends_on = [
     "mindroom.constants",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.entity_resolution",
     "mindroom.file_access",
     "mindroom.matrix.client_delivery",
@@ -3201,6 +3779,7 @@ depends_on = [
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.matrix_user_reads",
+    "mindroom.custom_tools.react",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
     "mindroom.matrix.message_builder",
@@ -3211,7 +3790,7 @@ visibility = ["mindroom.custom_tools.matrix_user"]
 path = "mindroom.custom_tools.computer_announcement"
 depends_on = [
     "mindroom.custom_tools.chat_ui",
-    "mindroom.orchestration.computer_runtime",
+    "mindroom.worker_computer.provider",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
 ]
@@ -3238,6 +3817,7 @@ depends_on = [
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.matrix_message_idempotency",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.thread_summary.notices",
     "mindroom.tool_system.authoring",
 ]
@@ -3245,9 +3825,11 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_voice_message"
 depends_on = [
+    "mindroom.credentials.environment",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.voice_message",
     "mindroom.tool_system.authoring",
@@ -3277,6 +3859,7 @@ depends_on = [
 visibility = [
     "mindroom.custom_tools.matrix_message",
     "mindroom.custom_tools.matrix_voice_message",
+    "mindroom.custom_tools.react",
 ]
 
 [[modules]]
@@ -3287,11 +3870,12 @@ depends_on = [
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.custom_tools.matrix_helpers",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.joined_members",
     "mindroom.matrix.room_history_reads",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.state",
     "mindroom.thread_workflow",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.plugin_room_access",
@@ -3301,6 +3885,7 @@ depends_on = [
 path = "mindroom.custom_tools.stop_reply"
 depends_on = [
     "mindroom.constants",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.message_builder",
     "mindroom.tool_system.authoring",
@@ -3311,6 +3896,7 @@ path = "mindroom.custom_tools.thread_move"
 depends_on = [
     "mindroom.constants",
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
@@ -3330,22 +3916,27 @@ depends_on = [
 path = "mindroom.custom_tools.thread_resolution"
 depends_on = [
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.thread_tags",
     "mindroom.tool_system.authoring",
+    "mindroom.tools.native_helpers",
 ]
 
 [[modules]]
 path = "mindroom.custom_tools.thread_snooze"
 depends_on = [
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.thread_tags",
     "mindroom.tool_system.authoring",
+    "mindroom.tools.native_helpers",
 ]
 
 [[modules]]
 path = "mindroom.custom_tools.thread_tags"
 depends_on = [
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.matrix.room_history_reads",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
@@ -3356,9 +3947,11 @@ depends_on = [
 path = "mindroom.custom_tools.thread_model"
 depends_on = [
     "mindroom.config.models",
+    "mindroom.custom_tools.tool_payloads",
     "mindroom.thread_models",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.tool_function",
+    "mindroom.tools.native_helpers",
     "mindroom.turn_model",
 ]
 
@@ -3369,7 +3962,7 @@ depends_on = [
     "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.responder_availability",
-    "mindroom.teams",
+    "mindroom.teams.formation",
     "mindroom.tool_system.plugins",
 ]
 
@@ -3692,6 +4285,7 @@ visibility = ["mindroom.providers.anthropic.messages"]
 path = "mindroom.providers.anthropic.messages"
 depends_on = [
     "mindroom.constants",
+    "mindroom.credentials.environment",
     "mindroom.llm",
     "mindroom.native_compaction",
     "mindroom.providers.anthropic.native_compaction",
@@ -3725,11 +4319,9 @@ visibility = [
 [[modules]]
 path = "mindroom.history.storage"
 depends_on = [
-    "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.session_storage.summary_rows",
-    "mindroom.constants",
     "mindroom.history.run_visibility",
     "mindroom.history.types",
     "mindroom.session_storage.types",
@@ -3742,7 +4334,7 @@ visibility = ["mindroom.session_storage.legacy_compaction_state", "mindroom.sess
 
 [[modules]]
 path = "mindroom.history.types"
-depends_on = []
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.history.interrupted_replay"
@@ -3991,6 +4583,8 @@ depends_on = [
 path = "mindroom.orchestration.todo_poke_runtime"
 depends_on = [
     "mindroom.constants",
+    "mindroom.custom_tools.todo_poke",
+    "mindroom.custom_tools.todo_state",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_room_admin",
     "mindroom.scheduling.tasks",
@@ -4136,6 +4730,7 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
+    "mindroom.automations.builtins",
     "mindroom.automations.runner",
     "mindroom.skill_learning.runner",
     "mindroom.knowledge_graph.runtime",
@@ -4162,7 +4757,7 @@ depends_on = [
     "mindroom.matrix.thread_forks",
     "mindroom.memory",
     "mindroom.reply_lifecycle",
-    "mindroom.teams",
+    "mindroom.teams.presentation",
     "mindroom.user_turn_time",
 ]
 visibility = ["mindroom.response_runner", "mindroom.approval.continuation_runner"]
@@ -4220,7 +4815,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_turn",
     "mindroom.streaming",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.schedule",
 ]
 visibility = [
     "mindroom.bot",
@@ -4289,6 +4884,7 @@ depends_on = [
     "mindroom.skill_learning.capture",
     "mindroom.streaming",
     "mindroom.teams",
+    "mindroom.teams.spec",
     "mindroom.thread_models",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.follow_ups",
@@ -4375,7 +4971,8 @@ visibility = ["mindroom.reply_turn.locked_turn"]
 path = "mindroom.responder_availability"
 depends_on = [
     "mindroom.entity_resolution",
-    "mindroom.teams",
+    "mindroom.teams.formation",
+    "mindroom.teams.spec",
 ]
 visibility = [
     "mindroom.custom_tools.matrix_agent_discovery",
@@ -4403,9 +5000,7 @@ path = "mindroom.teams"
 depends_on = [
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",
-    "mindroom.agent_loop.helper",
     "mindroom.agent_loop.prompt",
-    "mindroom.agent_policy",
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
@@ -4416,7 +5011,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delegation.execution",
     "mindroom.delegation.state",
-    "mindroom.entity_resolution",
     "mindroom.execution_preparation",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
@@ -4439,28 +5033,107 @@ depends_on = [
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
-    "mindroom.tool_system.tool_function",
-    "mindroom.tool_system.tool_schema",
+    "mindroom.teams.formation",
+    "mindroom.teams.presentation",
+    "mindroom.teams.prompt",
+    "mindroom.teams.runtime",
+    "mindroom.teams.spec",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
-    "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
     "mindroom.config.resolution",
     "mindroom.turn_model",
     "mindroom.delegation.cost",
     "mindroom.shell.background_scope",
-    "mindroom.matrix.message_builder",
 ]
 visibility = [
     "mindroom.api.openai_compat",
     "mindroom.approval.continuation_runner",
-    "mindroom.custom_tools.matrix_agent_discovery",
-    "mindroom.reply_turn.enrichment",
+    "mindroom.response_runner",
+]
+
+[[modules]]
+path = "mindroom.teams.spec"
+depends_on = []
+visibility = [
+    "mindroom.api.openai_compat",
+    "mindroom.approval.continuation_runner",
     "mindroom.responder_availability",
     "mindroom.response_runner",
+    "mindroom.teams",
+    "mindroom.teams.delegate_tools",
+    "mindroom.teams.formation",
+    "mindroom.teams.prompt",
+    "mindroom.turn_policy",
+]
+
+[[modules]]
+path = "mindroom.teams.formation"
+depends_on = [
+    "mindroom.agent_loop.helper",
+    "mindroom.agent_policy",
+    "mindroom.entity_resolution",
+    "mindroom.helper_usage",
+    "mindroom.providers.registry",
+    "mindroom.teams.spec",
+]
+visibility = [
+    "mindroom.custom_tools.matrix_agent_discovery",
+    "mindroom.responder_availability",
+    "mindroom.teams",
     "mindroom.turn_policy",
     "mindroom.turns.dispatch",
 ]
+
+[[modules]]
+path = "mindroom.teams.legacy_team_presentation"
+depends_on = []
+visibility = ["mindroom.teams.presentation"]
+
+[[modules]]
+path = "mindroom.teams.prompt"
+depends_on = ["mindroom.agent_loop.prompt", "mindroom.teams.spec"]
+visibility = ["mindroom.teams", "mindroom.teams.delegate_tools"]
+
+[[modules]]
+path = "mindroom.teams.delegate_tools"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.teams.prompt",
+    "mindroom.teams.spec",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.tool_schema",
+]
+visibility = ["mindroom.teams.runtime"]
+
+[[modules]]
+path = "mindroom.teams.runtime"
+depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.history.request_messages",
+    "mindroom.llm",
+    "mindroom.teams.delegate_tools",
+    "mindroom.tool_system.context_bound_streams",
+]
+visibility = [
+    "mindroom.api.openai_compat",
+    "mindroom.teams",
+    "mindroom.teams.presentation",
+]
+
+[[modules]]
+path = "mindroom.teams.presentation"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.llm",
+    "mindroom.matrix.message_builder",
+    "mindroom.teams.legacy_team_presentation",
+    "mindroom.teams.runtime",
+    "mindroom.tool_system.events",
+]
+visibility = ["mindroom.reply_turn.enrichment", "mindroom.teams"]
+
 [[modules]]
 path = "mindroom.config.worker_projection"
 depends_on = ["mindroom.config.models"]
@@ -4487,6 +5160,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.config.schema_hints",
     "mindroom.config.tool_aliases",
+    "mindroom.credentials.manager",
     "mindroom.config.access",
     "mindroom.config.legacy_fields",
     "mindroom.config.room_activity",
@@ -4512,7 +5186,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
-    "mindroom.integrations",
     "mindroom.matrix_identifiers",
     "mindroom.prompt_templates",
     "mindroom.prompts",
@@ -4530,6 +5203,7 @@ depends_on = [
     "mindroom.delegation.personas",
     "mindroom.config.tailnet_ssh",
     "mindroom.config.tool_aliases",
+    "mindroom.credentials.manager",
     "mindroom.config.access",
     "mindroom.config.agent",
     "mindroom.config.approval",
@@ -4723,6 +5397,8 @@ visibility = [
 [[modules]]
 path = "mindroom.memory.config"
 depends_on = [
+    "mindroom.credentials.environment",
+    "mindroom.credentials.sync",
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
     "mindroom.memory._mem0_usage",
@@ -4782,7 +5458,7 @@ visibility = ["mindroom.memory._file_backend"]
 [[modules]]
 path = "mindroom.memory._mem0_backend"
 depends_on = [
-    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.health_state",
     "mindroom.embeddings.errors",
     "mindroom.helper_usage",
     "mindroom.memory._mem0_usage",
@@ -4854,6 +5530,9 @@ depends_on = [
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.filters",
     "mindroom.failure_text",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
     "mindroom.mcp.config",
     "mindroom.mcp.errors",
     "mindroom.mcp.results",
@@ -4873,6 +5552,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.mcp.toolkit"
 depends_on = [
+    "mindroom.oauth.providers",
     "mindroom.mcp.config",
     "mindroom.mcp.errors",
     "mindroom.tool_system.authoring",
@@ -4981,6 +5661,8 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.matrix_identifiers",
     "mindroom.matrix.state_failures",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tools.native_helpers",
 ]
 
 [[modules]]
@@ -5287,6 +5969,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.desktop.credentials"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.desktop.configuration",
     "mindroom.tool_system.worker_routing",
 ]
@@ -5358,6 +6041,7 @@ depends_on = ["mindroom.desktop.protocol"]
 path = "mindroom.desktop.pairing_receiver"
 depends_on = [
     "mindroom.constants",
+    "mindroom.credentials.manager",
     "mindroom.desktop.configuration",
     "mindroom.desktop.credentials",
     "mindroom.desktop.pairing",
@@ -5699,7 +6383,7 @@ depends_on = [
     "mindroom.thread_export.projected_history",
     "mindroom.thread_export.selection",
     "mindroom.thread_export.storage",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.state",
 ]
 visibility = ["mindroom.thread_export.service"]
 
@@ -5781,7 +6465,7 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.state",
     "mindroom.tool_system.agent_tools",
 ]
 
@@ -5867,6 +6551,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_backends"
 depends_on = [
+    "mindroom.credentials.sync",
     "mindroom.config.voice",
     "mindroom.matrix.identity",
     "mindroom.matrix_rtc.call_session",
@@ -5884,6 +6569,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.delegation.state",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
@@ -5914,7 +6600,7 @@ depends_on = [
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_reads",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.state",
     "mindroom.tool_system.events",
 ]
 
@@ -6079,7 +6765,7 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.ingress_validation",
     "mindroom.journal_dispatch",
-    "mindroom.event_journal.legacy_turn_rows",
+    "mindroom.event_journal.legacy_ledger",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.client_session",
     "mindroom.matrix.conversation_hydration",
@@ -6217,6 +6903,7 @@ visibility = [
 path = "mindroom.cli.setup_detection"
 depends_on = [
     "mindroom.constants",
+    "mindroom.credentials.environment",
     "mindroom.providers.claude_code",
     "mindroom.providers.key_checks",
     "mindroom.providers.openai",
@@ -6239,6 +6926,7 @@ depends_on = [
     "mindroom.cli.interactive",
     "mindroom.cli.setup_detection",
     "mindroom.constants",
+    "mindroom.credentials.environment",
 ]
 visibility = ["mindroom.cli.config"]
 
@@ -6267,6 +6955,9 @@ depends_on = [
     "mindroom.providers.ollama.adapter",
     "mindroom.providers.registry",
     "mindroom.config.resolution",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.manager",
+    "mindroom.credentials.sync",
     "mindroom.matrix.health",
 ]
 
@@ -6420,6 +7111,7 @@ depends_on = [
 path = "mindroom.commands.desktop_commands"
 depends_on = [
     "mindroom.constants",
+    "mindroom.credentials.manager",
     "mindroom.desktop.configuration",
     "mindroom.desktop.credentials",
     "mindroom.desktop.identity",
@@ -6643,6 +7335,7 @@ visibility = [
     "mindroom.approval.resume",
     "mindroom.agent_loop",
     "mindroom.teams",
+    "mindroom.teams.runtime",
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.turn",
@@ -6662,6 +7355,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.metadata"
 depends_on = [
+    "mindroom.config.authored_overrides",
     "mindroom.constants",
     "mindroom.file_access",
     "mindroom.mcp.registry",
@@ -6676,6 +7370,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.agent_tools",
     "mindroom.config.tool_aliases",
+    "mindroom.credentials.manager",
     "mindroom.config.legacy_fields",
 ]
 
@@ -6753,6 +7448,9 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_model",
+    "mindroom.oauth.google",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
 ]
 visibility = []
 
@@ -6870,6 +7568,7 @@ path = "mindroom.egress_broker"
 depends_on = [
     "mindroom.atomic_file",
     "mindroom.config.egress_broker",
+    "mindroom.config.egress_presets",
     "mindroom.constants",
     "mindroom.credentials.policy",
     "mindroom.github_app_auth",
@@ -6884,6 +7583,9 @@ depends_on = [
     "mindroom.tool_system.tool_environment",
     "mindroom.workers.backend_kinds",
     "mindroom.tls_trust",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
 ]
 # The broker's wiring points: every module outside the feature that may import it.
 visibility = [
@@ -6894,7 +7596,6 @@ visibility = [
     "mindroom.api.frontend",
     "mindroom.api.sandbox_exec",
     "mindroom.api.secret_requests",
-    "mindroom.config.egress_broker",
     "mindroom.custom_tools.egress_credentials",
     "mindroom.orchestrator",
     "mindroom.tool_system.plugins",
@@ -6904,7 +7605,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.config.egress_broker"
-depends_on = ["mindroom.config.validation", "mindroom.credentials.policy", "mindroom.egress_broker"]
+depends_on = ["mindroom.config.validation", "mindroom.credentials.policy", "mindroom.config.egress_presets"]
+
+[[modules]]
+path = "mindroom.config.egress_presets"
+depends_on = []
 
 [[modules]]
 path = "mindroom.custom_tools.egress_credentials"
@@ -6912,6 +7617,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.config.egress_broker",
     "mindroom.config.main",
+    "mindroom.credentials.manager",
     "mindroom.egress_broker",
     "mindroom.runtime_resolution",
     "mindroom.secret_request_cards",
@@ -7001,6 +7707,7 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.progress",
+    "mindroom.oauth.providers",
 ]
 
 [[modules]]
@@ -7051,6 +7758,7 @@ depends_on = [
     "mindroom.failure_text",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
+    "mindroom.oauth.providers",
 ]
 
 [[modules]]
@@ -7095,6 +7803,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.worker_proxy_client"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.credentials.policy",
     "mindroom.tool_jobs.control",
     "mindroom.tool_system.media_transport",
@@ -7131,6 +7840,7 @@ depends_on = [
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.skill_usage",
+    "mindroom.credentials.manager",
 ]
 
 [[modules]]
@@ -7143,12 +7853,16 @@ path = "mindroom.tool_system.google_workspaces"
 depends_on = [
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.registry",
+    "mindroom.oauth.google",
+    "mindroom.oauth.providers",
     "mindroom.config.legacy_fields",
 ]
 
 [[modules]]
 path = "mindroom.tool_system.atlassian_connections"
 depends_on = [
+    "mindroom.oauth.atlassian",
+    "mindroom.custom_tools.atlassian",
     "mindroom.config.legacy_fields",
     "mindroom.tool_system.registration",
     "mindroom.tool_system.registry",
@@ -7166,6 +7880,7 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.tool_system.registry",
     "mindroom.tool_system.metadata",
+    "mindroom.credentials.manager",
 ]
 
 [[modules]]
@@ -7178,21 +7893,25 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.config.authored_overrides"
+depends_on = []
+
+[[modules]]
 path = "mindroom.config.resolution"
 depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.agent_policy",
+    "mindroom.config.authored_overrides",
     "mindroom.config.automations",
     "mindroom.config.models",
     "mindroom.constants",
     "mindroom.history.types",
-    "mindroom.tool_system.catalog",
 ]
 
 [[modules]]
 path = "mindroom.tool_system.plugins"
 depends_on = [
-    "mindroom.api.validation_errors",
+    "mindroom.http_validation",
     "mindroom.automations.registry",
     "mindroom.config.plugin",
     "mindroom.egress_broker",
@@ -7215,7 +7934,10 @@ path = "mindroom.media_delivery"
 depends_on = ["mindroom.file_access", "mindroom.llm", "mindroom.tool_system.tool_function"]
 visibility = [
     "mindroom.api.sandbox_runner",
+    "mindroom.custom_tools.agent_manager",
     "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.browser",
+    "mindroom.custom_tools.filesystem",
     "mindroom.worker_computer.mcp_provider",
 ]
 
@@ -7224,24 +7946,44 @@ path = "mindroom.tool_system"
 depends_on = ["mindroom.config.approval"]
 
 [[modules]]
-path = "mindroom.thread_summary"
+path = "mindroom.thread_summary.state"
+depends_on = ["mindroom.constants", "mindroom.matrix.conversation_reads"]
+
+[[modules]]
+path = "mindroom.thread_summary.schedule"
+depends_on = ["mindroom.thread_summary.state", "mindroom.thread_tag_vocabulary"]
+
+[[modules]]
+path = "mindroom.thread_summary.generation"
 depends_on = [
+    "mindroom.agent_loop.helper",
     "mindroom.config.models",
-    "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.helper_usage",
+    "mindroom.llm",
+    "mindroom.providers.registry",
+    "mindroom.room_settings",
+    "mindroom.thread_summary.notices",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.events",
+]
+visibility = ["mindroom.thread_summary.automatic"]
+
+[[modules]]
+path = "mindroom.thread_summary.automatic"
+depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.thread_fork_access",
+    "mindroom.matrix.thread_forks",
+    "mindroom.thread_summary.generation",
     "mindroom.thread_summary.notices",
-    "mindroom.providers.registry",
-    "mindroom.agent_loop.helper",
-    "mindroom.llm",
-    "mindroom.room_settings",
+    "mindroom.thread_summary.schedule",
+    "mindroom.thread_summary.state",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
-    "mindroom.tool_system.events",
-    "mindroom.matrix.thread_forks",
 ]
+visibility = ["mindroom.post_response_effects", "mindroom.turns.dispatch"]
 
 [[modules]]
 path = "mindroom.thread_summary.notices"
@@ -7249,8 +7991,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
+    "mindroom.thread_summary.schedule",
+    "mindroom.thread_summary.state",
     "mindroom.matrix.message_builder",
-    "mindroom.thread_summary",
 ]
 
 [[modules]]
@@ -7262,6 +8005,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
+    "mindroom.credentials.sync",
     "mindroom.config.voice",
     "mindroom.matrix.identity",
     "mindroom.matrix.media",
@@ -7302,7 +8046,8 @@ depends_on = [
     "mindroom.interactive_models",
     "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.automatic",
+    "mindroom.thread_summary.schedule",
     "mindroom.tool_system.events",
     "mindroom.interactive",
 ]
@@ -7321,7 +8066,7 @@ path = "mindroom.turn_store"
 depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
-    "mindroom.event_journal.legacy_turn_rows",
+    "mindroom.event_journal.legacy_ledger",
     "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.turn_record",
@@ -7503,9 +8248,10 @@ depends_on = [
     "mindroom.response_admission",
     "mindroom.response_payload_preparation",
     "mindroom.response_sources",
-    "mindroom.teams",
+    "mindroom.teams.formation",
     "mindroom.thread_models",
-    "mindroom.thread_summary",
+    "mindroom.thread_summary.automatic",
+    "mindroom.thread_summary.schedule",
     "mindroom.timestamp_formatting",
     "mindroom.turn_policy",
     "mindroom.turn_record",
@@ -7563,7 +8309,8 @@ depends_on = [
     "mindroom.responder_availability",
     "mindroom.room_settings",
     "mindroom.runtime_protocols",
-    "mindroom.teams",
+    "mindroom.teams.formation",
+    "mindroom.teams.spec",
 ]
 
 [[modules]]
@@ -7588,6 +8335,7 @@ depends_on = [
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
     "mindroom.usage.limit_store",
+    "mindroom.credentials.environment",
 ]
 
 [[modules]]
@@ -7730,6 +8478,7 @@ depends_on = [
     "mindroom.knowledge.legacy_git_checkout",
     "mindroom.knowledge.redaction",
     "mindroom.tool_system.worker_routing",
+    "mindroom.credentials.manager",
 ]
 visibility = ["mindroom.knowledge.manager"]
 
@@ -7745,6 +8494,7 @@ visibility = [
     "mindroom.egress_broker",
     "mindroom.knowledge.git_source",
     "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_worker",
 ]
 
 [[modules]]
@@ -7823,7 +8573,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
-    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.health_state",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
 ]
@@ -7833,11 +8583,12 @@ path = "mindroom.knowledge.refresh_locks"
 depends_on = []
 visibility = [
     "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_worker",
 ]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_entrypoint"
-depends_on = ["mindroom.knowledge.refresh_runner"]
+depends_on = ["mindroom.knowledge.refresh_worker"]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
@@ -7845,22 +8596,39 @@ depends_on = [
     "mindroom.knowledge.file_listing",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
-    "mindroom.config.main",
+    "mindroom.embeddings.health_state",
     "mindroom.constants",
     "mindroom.github_app_auth",
     "mindroom.knowledge.index_metadata",
-    "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_outcome",
     "mindroom.knowledge.registry",
     "mindroom.tool_system.worker_routing",
-    "mindroom.config.knowledge",
+    "mindroom.credentials.manager",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_worker"
+depends_on = [
+    "mindroom.config.knowledge",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.github_app_auth",
+    "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.redaction",
+    "mindroom.knowledge.refresh_locks",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.registry",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.api.knowledge", "mindroom.knowledge.refresh_entrypoint"]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_policy"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.knowledge.availability",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.registry",
@@ -7891,6 +8659,8 @@ path = "mindroom.knowledge.rerank"
 depends_on = [
     "mindroom.config.knowledge",
     "mindroom.constants",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.sync",
     "mindroom.providers.google_adc",
     "mindroom.tool_system.dependencies",
 ]
@@ -7964,7 +8734,6 @@ expose = [
     "create_session_storage",
     "create_state_storage",
     "prepare_conversation_database",
-    "save_compaction_usage",
 ]
 from = ["mindroom.session_storage.agent_storage"]
 
@@ -7981,28 +8750,66 @@ expose = [
     "envelope.run_prepared_team",
     "envelope.TeamTurnSpec",
     "envelope.team_response_stream",
-    "formation.TeamIntent",
-    "formation.TeamMemberStatus",
-    "formation.TeamOutcome",
-    "formation.TeamResolution",
-    "formation.TeamResolutionMember",
-    "formation.decide_team_formation",
-    "formation.resolve_configured_team",
-    "formation.resolve_live_shared_agent_names",
-    "formation.select_ad_hoc_team_mode",
     "members.BuiltTeam",
     "members.ResolvedExactTeamMembers",
     "members.allow_direct_private_team_agents",
     "members.build_team_spec",
     "members.resolve_exact_team_members",
-    "presentation.strip_team_display",
     "resume.continue_paused_team_run",
-    "runtime.MemberEvent",
-    "runtime.team_usage",
-    "runtime.team_usage_runs",
-    "spec.TeamMode",
 ]
 from = ["mindroom.teams"]
+
+[[interfaces]]
+expose = ["TeamMode"]
+from = ["mindroom.teams.spec"]
+
+[[interfaces]]
+expose = ["MemberBuild", "TeamMember", "TeamSpec"]
+from = ["mindroom.teams.spec"]
+visibility = ["mindroom.teams"]
+
+[[interfaces]]
+expose = [
+    "TeamIntent",
+    "TeamMemberStatus",
+    "TeamOutcome",
+    "TeamResolution",
+    "TeamResolutionMember",
+    "decide_team_formation",
+    "resolve_configured_team",
+    "resolve_live_shared_agent_names",
+    "select_ad_hoc_team_mode",
+]
+from = ["mindroom.teams.formation"]
+
+[[interfaces]]
+expose = ["not_materializable_team_agents_message", "resolve_team_materializable_agent_names"]
+from = ["mindroom.teams.formation"]
+visibility = ["mindroom.teams"]
+
+[[interfaces]]
+expose = ["strip_team_display"]
+from = ["mindroom.teams.presentation"]
+
+[[interfaces]]
+expose = [
+    "NO_TEAM_RESPONSE",
+    "TeamStreamPresentation",
+    "apply_team_event",
+    "format_team_header",
+    "publish_team_presentation",
+]
+from = ["mindroom.teams.presentation"]
+visibility = ["mindroom.teams"]
+
+[[interfaces]]
+expose = ["MemberEvent", "team_usage", "team_usage_runs"]
+from = ["mindroom.teams.runtime"]
+
+[[interfaces]]
+expose = ["TeamDecisions", "continue_team", "leader_tool_specs", "run_team"]
+from = ["mindroom.teams.runtime"]
+visibility = ["mindroom.teams"]
 
 [[interfaces]]
 expose = [
@@ -8370,7 +9177,6 @@ from = ["mindroom.tool_system.registration"]
 expose = [
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
-    "apply_authored_overrides",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",
     "get_tool_by_name",
@@ -8398,7 +9204,6 @@ expose = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
-    "apply_authored_overrides",
     "builtin_tool_registry",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",
@@ -8526,6 +9331,11 @@ expose = [
 from = ["mindroom.tool_system.runtime_context"]
 
 [[interfaces]]
+expose = ["register_tool_runtime_media_attachment"]
+from = ["mindroom.tool_system.runtime_context"]
+visibility = ["mindroom.custom_tools.desktop_attachment"]
+
+[[interfaces]]
 expose = [
     "current_budget_monitor",
     "current_requester_id",
@@ -8597,6 +9407,18 @@ expose = [
     "worker_scope_allows_shared_only_integrations",
 ]
 from = ["mindroom.tool_system.worker_routing"]
+
+[[interfaces]]
+from = ["mindroom.tool_system.worker_routing"]
+expose = [
+    "WORKER_CREDENTIALS_DIRNAME",
+    "WORKER_SHARED_CREDENTIALS_DIRNAME",
+    "pinned_worker_state_scope_key",
+    "worker_log_id",
+    "worker_root_path",
+]
+visibility = ["mindroom.credentials.manager"]
+exclusive = true
 
 
 [[interfaces]]
@@ -8913,6 +9735,7 @@ depends_on = [
     "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.credentials.manager",
 ]
 
 [[modules]]
@@ -8932,6 +9755,7 @@ depends_on = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agent_tools",
     "mindroom.origins",
+    "mindroom.oauth.providers",
 ]
 
 [[modules]]
@@ -8939,7 +9763,7 @@ path = "mindroom.mcp_gateway.types"
 depends_on = []
 
 [[interfaces]]
-expose = ["SCRIPT_GATEWAY_PORT_ENV", "bind_script_tool_broker", "listener_port", "router", "serve_listener", "serve_script_gateway_listener"]
+expose = ["bind_script_tool_broker", "router", "serve_script_gateway_listener"]
 from = ["mindroom.api.script_gateway"]
 
 [[interfaces]]
@@ -9086,6 +9910,7 @@ visibility = ["mindroom.orchestration.storage_preparation"]
 [[modules]]
 path = "mindroom.credentials.legacy_tool_credentials"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.tool_system.catalog",
 ]
 visibility = ["mindroom.orchestration.storage_preparation"]
@@ -9626,6 +10451,7 @@ depends_on = ["mindroom.llm"]
 path = "mindroom.providers.gemini"
 depends_on = [
     "mindroom.constants",
+    "mindroom.credentials.environment",
     "mindroom.llm",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.credentials",
@@ -9644,6 +10470,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.providers.ollama.adapter"
 depends_on = [
+    "mindroom.credentials.sync",
     "mindroom.llm",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
@@ -9713,7 +10540,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.direct"
 depends_on = [
-    "mindroom.ai",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.sessions",
     "mindroom.response_turn",
@@ -9803,20 +10629,9 @@ path = "mindroom.event_journal.history_recovery"
 depends_on = []
 
 [[modules]]
-path = "mindroom.event_journal.legacy_response_attempts"
+path = "mindroom.event_journal.legacy_ledger"
 depends_on = ["mindroom.event_journal"]
-visibility = ["mindroom.event_journal"]
-
-[[modules]]
-path = "mindroom.event_journal.legacy_turn_rows"
-depends_on = [
-    "mindroom.event_journal",
-    "mindroom.history.types",
-    "mindroom.model_selection",
-    "mindroom.turn_record",
-]
-visibility = ["mindroom.bot", "mindroom.event_journal", "mindroom.turn_store"]
-
+visibility = ["mindroom.bot", "mindroom.turn_store"]
 
 [[modules]]
 path = "mindroom.worker_computer.worker_browser"
@@ -9981,7 +10796,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.plugin_routes",
     "mindroom.api.request_body_limit",
-    "mindroom.api.script_gateway",
+    "mindroom.api.listener",
     "mindroom.origins",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
@@ -9992,7 +10807,7 @@ visibility = ["mindroom.orchestrator", "mindroom.plugin_http"]
 path = "mindroom.api.tailnet_ssh_gateway"
 depends_on = [
     "mindroom.api.config_lifecycle",
-    "mindroom.api.script_gateway",
+    "mindroom.api.listener",
     "mindroom.tailnet_ssh.links",
 ]
 visibility = ["mindroom.api.main", "mindroom.api.workers", "mindroom.orchestrator"]
@@ -10027,6 +10842,9 @@ depends_on = [
     "mindroom.terminal.session",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
     "mindroom.config.agent",
 ]
 
@@ -10119,7 +10937,7 @@ visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 path = "mindroom.orchestration.server_state"
 depends_on = [
     "mindroom.matrix_openid",
-    "mindroom.orchestration.computer_runtime",
+    "mindroom.worker_computer.provider",
     "mindroom.matrix.state_failures",
     "mindroom.matrix.event_types",
 ]
@@ -10131,15 +10949,28 @@ depends_on = [
     "mindroom.api.app_state",
     "mindroom.room_agent_access",
     "mindroom.tool_system.worker_routing",
+    "mindroom.worker_computer.provider",
     "mindroom.worker_computer.sessions",
-    "mindroom.workers.backend_kinds",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.api.config_lifecycle",
     "mindroom.api.main",
     "mindroom.api.computers",
+    "mindroom.matrix.joined_members",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.worker_computer.provider"
+depends_on = [
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
-    "mindroom.matrix.joined_members",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.worker_computer.sessions",
+    "mindroom.workers.backend_kinds",
+]
+visibility = [
+    "mindroom.custom_tools.computer_announcement",
+    "mindroom.orchestration.computer_runtime",
+    "mindroom.orchestration.server_state",
 ]
 
 [[modules]]
@@ -10253,7 +11084,14 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.browser_proxy"
 depends_on = []
-visibility = ["mindroom.custom_tools.browser_mcp", "mindroom.egress_broker", "mindroom.tools.agentql", "mindroom.worker_computer.mcp_provider"]
+visibility = [
+    "mindroom.custom_tools.browser",
+    "mindroom.custom_tools.browser_mcp",
+    "mindroom.egress_broker",
+    "mindroom.tools.agentql",
+    "mindroom.tools.crawl4ai",
+    "mindroom.worker_computer.mcp_provider",
+]
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
@@ -10337,7 +11175,14 @@ expose = ["VisualizationTools"]
 
 [[modules]]
 path = "mindroom.tools.mem0"
-depends_on = ["mindroom.failure_text", "mindroom.tool_system.authoring", "mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tool_system.runtime_context"]
+depends_on = [
+    "mindroom.failure_text",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tools.native_helpers",
+]
 
 [[modules]]
 path = "mindroom.tools.browser_mcp"
@@ -10741,18 +11586,22 @@ path = "mindroom.agent_cli.cli_shell_agent"
 depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
-    "mindroom.agent_cli.shell_access",
-    "mindroom.agent_cli.shell_contract",
     "mindroom.custom_tools.job",
     "mindroom.delegation.state",
-    "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.ai"]
+
+[[modules]]
+path = "mindroom.agent_cli.cli_shell_window"
+depends_on = [
+    "mindroom.agent_cli.lifetime",
+    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_function",
 ]
-visibility = [
-    "mindroom.agents",
-    "mindroom.ai",
-]
+visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.agent_cli.minimal_agent"
@@ -10962,10 +11811,17 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.toolkit_builder"
 depends_on = [
+    "mindroom.credentials.manager",
+    "mindroom.custom_tools.agent_manager",
+    "mindroom.custom_tools.compact_context",
+    "mindroom.custom_tools.contacts",
     "mindroom.custom_tools.delegate",
+    "mindroom.custom_tools.dynamic_tools",
     "mindroom.custom_tools.knowledge_graph",
     "mindroom.custom_tools.memory",
     "mindroom.custom_tools.report_publishing",
+    "mindroom.custom_tools.self_config",
+    "mindroom.custom_tools.skill_manage",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.construction",
@@ -10987,12 +11843,12 @@ visibility = [
 [[modules]]
 path = "mindroom.worker_computer.browser_bundle"
 depends_on = []
-visibility = ["mindroom.worker_computer.mcp_provider"]
+visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.browser.profile_locks"
 depends_on = []
-visibility = ["mindroom.worker_computer.mcp_provider"]
+visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_provider"]
 
 [[interfaces]]
 from = ["mindroom.browser.profile_locks"]
@@ -11025,6 +11881,8 @@ visibility = ["mindroom.usage.provider_limits"]
 path = "mindroom.usage.provider_accounts"
 depends_on = [
     "mindroom.config.schema_hints",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.sync",
     "mindroom.providers.credentials",
     "mindroom.providers.identity",
     "mindroom.providers.names",
@@ -11106,7 +11964,16 @@ depends_on = ["mindroom.providers.registry", "mindroom.json_utils", "mindroom.ju
 
 [[modules]]
 path = "mindroom.judgment.evaluator"
-depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.judgment.execution", "mindroom.judgment.llm", "mindroom.judgment.openai_decisions", "mindroom.judgment.typesafe"]
+depends_on = [
+    "mindroom.config.judgment",
+    "mindroom.credentials.environment",
+    "mindroom.credentials.sync",
+    "mindroom.judgment.client",
+    "mindroom.judgment.execution",
+    "mindroom.judgment.llm",
+    "mindroom.judgment.openai_decisions",
+    "mindroom.judgment.typesafe",
+]
 
 [[modules]]
 path = "mindroom.path_confinement"
@@ -11221,7 +12088,14 @@ expose = ["GroqTools"]
 
 [[modules]]
 path = "mindroom.tools.airflow"
-depends_on = ["mindroom.file_access", "mindroom.path_confinement", "mindroom.tool_system.authoring", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+depends_on = [
+    "mindroom.file_access",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
 
 [[modules]]
 path = "mindroom.agent_cli.cli_approval_waits"
@@ -11284,12 +12158,17 @@ visibility = [
 
 [[modules]]
 path = "mindroom.automations.registry"
+depends_on = ["mindroom.config.automations"]
+
+[[modules]]
+path = "mindroom.automations.builtins"
 depends_on = [
     "mindroom.automations.dreaming",
-    "mindroom.automations.prompt_curation",
-    "mindroom.config.automations",
     "mindroom.automations.exploration",
+    "mindroom.automations.prompt_curation",
+    "mindroom.automations.registry",
 ]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
@@ -11303,7 +12182,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.providers.registry",
 ]
-visibility = ["mindroom.automations.registry"]
+visibility = ["mindroom.automations.builtins"]
 
 [[modules]]
 path = "mindroom.automations.dreaming"
@@ -11315,7 +12194,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.config.resolution",
 ]
-visibility = ["mindroom.automations.registry"]
+visibility = ["mindroom.automations.builtins"]
 
 [[modules]]
 path = "mindroom.listening.markers"
@@ -11406,6 +12285,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
 ]
 visibility = [
+    "mindroom.custom_tools.skill_manage",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
 ]
@@ -11427,6 +12307,8 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_schema",
     "mindroom.turn_model",
+    "mindroom.custom_tools.dynamic_tools",
+    "mindroom.custom_tools.skill_manage",
 ]
 visibility = ["mindroom.skill_learning.runner"]
 
@@ -11449,7 +12331,7 @@ visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.cli.local_model_config"
-depends_on = ["mindroom.atomic_file", "mindroom.cli.config", "mindroom.config.main", "mindroom.path_confinement"]
+depends_on = ["mindroom.atomic_file", "mindroom.config.main", "mindroom.path_confinement"]
 visibility = ["mindroom.cli.config"]
 
 [[modules]]
@@ -11501,13 +12383,22 @@ path = "mindroom.knowledge_graph.clients"
 depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.helper_usage",
-    "mindroom.knowledge_graph.store",
+    "mindroom.knowledge_graph.async_support",
     "mindroom.knowledge_graph.usage",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.session_storage.agent_storage",
 ]
 visibility = ["mindroom.knowledge_graph.store"]
+
+[[modules]]
+path = "mindroom.knowledge_graph.async_support"
+depends_on = []
+visibility = [
+    "mindroom.knowledge_graph.clients",
+    "mindroom.knowledge_graph.ingestion",
+    "mindroom.knowledge_graph.store",
+]
 
 [[modules]]
 path = "mindroom.knowledge_graph.scope"
@@ -11521,6 +12412,7 @@ path = "mindroom.knowledge_graph.store"
 depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.entity_resolution",
+    "mindroom.knowledge_graph.async_support",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.embedded_server",
     "mindroom.knowledge_graph.extraction",
@@ -11566,6 +12458,7 @@ depends_on = [
     "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.history.session_runs",
+    "mindroom.knowledge_graph.async_support",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.legacy_ingestion",
     "mindroom.knowledge_graph.names",
@@ -11595,6 +12488,7 @@ depends_on = [
     "mindroom.knowledge_graph.store",
     "mindroom.tool_system.authoring",
     "mindroom.config.resolution",
+    "mindroom.tools.native_helpers",
 ]
 visibility = ["mindroom.agents", "mindroom.tool_system.toolkit_builder"]
 
@@ -11618,7 +12512,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.config.resolution",
 ]
-visibility = ["mindroom.automations.registry"]
+visibility = ["mindroom.automations.builtins"]
 [[modules]]
 path = "mindroom.history.mid_turn_compaction"
 depends_on = [
@@ -11710,9 +12604,8 @@ depends_on = ["mindroom.matrix.identity", "mindroom.slack.api", "mindroom.slack.
 [[modules]]
 path = "mindroom.slack.integration"
 depends_on = [
-    "mindroom.api.config_lifecycle",
-    "mindroom.api.slack_events",
-    "mindroom.integrations",
+    "mindroom.api.app_state",
+    "mindroom.credentials.manager",
     "mindroom.slack.api",
     "mindroom.slack.delivery",
     "mindroom.slack.event_source",
@@ -11724,7 +12617,12 @@ visibility = ["mindroom.api.slack_events", "mindroom.integrations"]
 
 [[modules]]
 path = "mindroom.slack.oauth"
-depends_on = ["mindroom.slack.api", "mindroom.slack.app"]
+depends_on = [
+    "mindroom.credentials.manager",
+    "mindroom.oauth.providers",
+    "mindroom.slack.api",
+    "mindroom.slack.app",
+]
 
 [[modules]]
 path = "mindroom.slack.render"
@@ -11760,8 +12658,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.slack.event_source"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.event_sources",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.oauth.service",
     "mindroom.reactive_triggers.models",
     "mindroom.slack.api",
     "mindroom.slack.app",
@@ -11795,6 +12695,12 @@ depends_on = [
     "mindroom.slack.render",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.runtime_context",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.client",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tools.native_helpers",
 ]
 
 [[modules]]
@@ -12020,8 +12926,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.reactive_triggers.github_pr"
 depends_on = [
+    "mindroom.credentials.manager",
     "mindroom.config.external_trigger_policy",
     "mindroom.github_client",
+    "mindroom.oauth.providers",
     "mindroom.reactive_triggers.models",
 ]
 
@@ -12042,6 +12950,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.reactive_triggers.external_sources"
 depends_on = [
+    "mindroom.credentials.environment",
     "mindroom.config.external_trigger_policy",
     "mindroom.delivery_replay",
     "mindroom.reactive_triggers.github_pr",
@@ -12088,6 +12997,11 @@ depends_on = [
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.worker_routing",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.providers",
+    "mindroom.custom_tools.external_trigger_context",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tools.native_helpers",
     "mindroom.config.external_trigger_policy",
 ]
 
@@ -12239,6 +13153,1790 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_schema",
 ]
+
+# Built-in tools. Keep tools/__init__.py undeclared: its registration imports would merge unrelated cycles.
+
+[[modules]]
+path = "mindroom.tools._sql_cursor"
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tools.native_helpers"]
+visibility = ["mindroom.tools.postgres", "mindroom.tools.redshift"]
+
+[[modules]]
+path = "mindroom.tools.agent_manager"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.apify"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.approved_egress"
+depends_on = [
+    "mindroom.config.resolution",
+    "mindroom.egress",
+    "mindroom.tool_system.approval_exemptions",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tools.arxiv"
+depends_on = ["mindroom.custom_tools.arxiv", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.atlassian"
+depends_on = [
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.atlassian_spaces",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.attachments"
+depends_on = [
+    "mindroom.custom_tools.attachments",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.aws_lambda"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.aws_ses"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.baidusearch"
+depends_on = [
+    "mindroom.custom_tools.baidusearch",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.bitbucket"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.brandfetch"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.brightdata"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tool_system.tool_function",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.browser"
+depends_on = ["mindroom.custom_tools.browser", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.browserbase"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.cal_com"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.calculator"
+depends_on = [
+    "mindroom.custom_tools.calculator",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.callback_manager"
+depends_on = [
+    "mindroom.custom_tools.callback_manager",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.cartesia"
+depends_on = [
+    "mindroom.custom_tools.cartesia",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.chat_ui"
+depends_on = ["mindroom.custom_tools.chat_ui", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.claude_agent"
+depends_on = [
+    "mindroom.custom_tools.claude_agent",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.clickup"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.compact_context"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.composio"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.config_manager"
+depends_on = [
+    "mindroom.tool_system.approval_exemptions",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.contacts"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.crawl4ai"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.worker_computer.browser_proxy",
+]
+
+[[modules]]
+path = "mindroom.tools.csv"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.custom_api"
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.string_mapping",
+]
+
+[[modules]]
+path = "mindroom.tools.daytona"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+    "mindroom.tools.string_mapping",
+]
+
+[[modules]]
+path = "mindroom.tools.delegate"
+depends_on = ["mindroom.delegation.state", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.desktop"
+depends_on = [
+    "mindroom.custom_tools.desktop",
+    "mindroom.shell.policy",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.discord"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.docker"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.duckdb"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.duckduckgo"
+depends_on = [
+    "mindroom.custom_tools.ddgs_search",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.dynamic_tools"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.e2b"
+depends_on = ["mindroom.custom_tools.e2b", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.eleven_labs"
+depends_on = [
+    "mindroom.custom_tools.eleven_labs",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.email"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.email_invite"
+depends_on = [
+    "mindroom.custom_tools.email_invite",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.exa"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.fal"
+depends_on = ["mindroom.custom_tools.fal", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.filesystem"
+depends_on = [
+    "mindroom.custom_tools.filesystem",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.financial_datasets_api"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.firecrawl"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.gemini"
+depends_on = [
+    "mindroom.custom_tools.gemini_media",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.giphy"
+depends_on = ["mindroom.custom_tools.giphy", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.github"
+depends_on = ["mindroom.custom_tools.github", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.gmail"
+depends_on = ["mindroom.custom_tools.gmail", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.google_bigquery"
+depends_on = [
+    "mindroom.custom_tools.google_bigquery",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.google_calendar"
+depends_on = [
+    "mindroom.custom_tools.google_calendar",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.google_docs"
+depends_on = [
+    "mindroom.custom_tools.google_docs",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.google_drive"
+depends_on = [
+    "mindroom.custom_tools.google_drive",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.google_maps"
+depends_on = [
+    "mindroom.failure_text",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.google_scholar"
+depends_on = [
+    "mindroom.custom_tools.google_scholar",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.google_sheets"
+depends_on = [
+    "mindroom.custom_tools.google_sheets",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.google_tasks"
+depends_on = [
+    "mindroom.custom_tools.google_tasks",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.googlesearch"
+depends_on = [
+    "mindroom.custom_tools.ddgs_search",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.duckduckgo",
+]
+
+[[modules]]
+path = "mindroom.tools.hackernews"
+depends_on = [
+    "mindroom.custom_tools.hackernews",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.invite_router"
+depends_on = [
+    "mindroom.custom_tools.invite_router",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.jina"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.linear"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.linkup"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.lumalabs"
+depends_on = [
+    "mindroom.custom_tools.lumalabs",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.matrix_api"
+depends_on = [
+    "mindroom.custom_tools.matrix_api",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.matrix_message"
+depends_on = [
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.matrix_room"
+depends_on = [
+    "mindroom.custom_tools.matrix_room",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.matrix_user"
+depends_on = [
+    "mindroom.custom_tools.matrix_user",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.matrix_voice_message"
+depends_on = [
+    "mindroom.custom_tools.matrix_voice_message",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.memory"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.microsoft_files"
+depends_on = [
+    "mindroom.custom_tools.microsoft_files",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.microsoft_meetings"
+depends_on = [
+    "mindroom.custom_tools.microsoft_meetings",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.microsoft_onenote"
+depends_on = [
+    "mindroom.custom_tools.microsoft_onenote",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.microsoft_people"
+depends_on = [
+    "mindroom.custom_tools.microsoft_people",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.microsoft_sharepoint"
+depends_on = [
+    "mindroom.custom_tools.microsoft_sharepoint",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.microsoft_teams"
+depends_on = [
+    "mindroom.custom_tools.microsoft_teams",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.microsoft_todo"
+depends_on = [
+    "mindroom.custom_tools.microsoft_todo",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.native_helpers"
+depends_on = []
+visibility = [
+    "mindroom.custom_tools.agent_manager",
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.calculator",
+    "mindroom.custom_tools.claude_agent",
+    "mindroom.custom_tools.contacts",
+    "mindroom.custom_tools.ddgs_search",
+    "mindroom.custom_tools.e2b",
+    "mindroom.custom_tools.gmail",
+    "mindroom.custom_tools.google_bigquery",
+    "mindroom.custom_tools.google_calendar",
+    "mindroom.custom_tools.google_docs",
+    "mindroom.custom_tools.google_drive",
+    "mindroom.custom_tools.google_sheets",
+    "mindroom.custom_tools.hackernews",
+    "mindroom.custom_tools.knowledge_graph",
+    "mindroom.custom_tools.matrix_api",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.custom_tools.script",
+    "mindroom.custom_tools.serper",
+    "mindroom.custom_tools.shared_directories",
+    "mindroom.custom_tools.slack",
+    "mindroom.custom_tools.spotify",
+    "mindroom.custom_tools.terminal",
+    "mindroom.custom_tools.thread_model",
+    "mindroom.custom_tools.thread_resolution",
+    "mindroom.custom_tools.thread_snooze",
+    "mindroom.custom_tools.triggers",
+    "mindroom.custom_tools.usage_stats",
+    "mindroom.custom_tools.workflow",
+    "mindroom.custom_tools.youtube",
+    "mindroom.tools._sql_cursor",
+    "mindroom.tools.airflow",
+    "mindroom.tools.aws_lambda",
+    "mindroom.tools.bitbucket",
+    "mindroom.tools.brandfetch",
+    "mindroom.tools.brightdata",
+    "mindroom.tools.browserbase",
+    "mindroom.tools.cal_com",
+    "mindroom.tools.clickup",
+    "mindroom.tools.composio",
+    "mindroom.tools.csv",
+    "mindroom.tools.daytona",
+    "mindroom.tools.discord",
+    "mindroom.tools.docker",
+    "mindroom.tools.duckdb",
+    "mindroom.tools.exa",
+    "mindroom.tools.financial_datasets_api",
+    "mindroom.tools.google_maps",
+    "mindroom.tools.linear",
+    "mindroom.tools.mem0",
+    "mindroom.tools.neo4j",
+    "mindroom.tools.notion",
+    "mindroom.tools.openbb",
+    "mindroom.tools.openweather",
+    "mindroom.tools.oxylabs",
+    "mindroom.tools.pandas",
+    "mindroom.tools.postgres",
+    "mindroom.tools.reddit",
+    "mindroom.tools.redshift",
+    "mindroom.tools.shopify",
+    "mindroom.tools.spider",
+    "mindroom.tools.sql",
+    "mindroom.tools.telegram",
+    "mindroom.tools.todoist",
+    "mindroom.tools.trafilatura",
+    "mindroom.tools.trello",
+    "mindroom.tools.twilio",
+    "mindroom.tools.whatsapp",
+    "mindroom.tools.yfinance",
+    "mindroom.tools.zendesk",
+    "mindroom.tools.zep",
+    "mindroom.tools.zoom",
+]
+
+[[modules]]
+path = "mindroom.tools.neo4j"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.newspaper4k"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.notion"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.oauth_connections"
+depends_on = [
+    "mindroom.custom_tools.oauth_connections",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.openbb"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.openweather"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.outlook_calendar"
+depends_on = [
+    "mindroom.custom_tools.outlook_calendar",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.outlook_mail"
+depends_on = [
+    "mindroom.custom_tools.outlook_mail",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.oxylabs"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.pandas"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.postgres"
+depends_on = [
+    "mindroom.tool_system",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools._sql_cursor",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.pubmed"
+depends_on = ["mindroom.custom_tools.pubmed", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.react"
+depends_on = ["mindroom.custom_tools.react", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.reasoning"
+depends_on = [
+    "mindroom.custom_tools.reasoning",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.reddit"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.redshift"
+depends_on = [
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools._sql_cursor",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.report_publishing"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.resend"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.scheduler"
+depends_on = [
+    "mindroom.custom_tools.scheduler",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.scrapegraph"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.script"
+depends_on = ["mindroom.custom_tools.script", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.searxng"
+depends_on = ["mindroom.custom_tools.searxng", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.self_config"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.serpapi"
+depends_on = ["mindroom.custom_tools.serpapi", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.serper"
+depends_on = ["mindroom.custom_tools.serper", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.shared_directories"
+depends_on = [
+    "mindroom.custom_tools.shared_directories",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.shopify"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.skill_manage"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.slack"
+depends_on = ["mindroom.custom_tools.slack", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.sleep"
+depends_on = ["mindroom.custom_tools.sleep", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.spider"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.spotify"
+depends_on = ["mindroom.custom_tools.spotify", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.sql"
+depends_on = [
+    "mindroom.tool_system",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.stop_reply"
+depends_on = [
+    "mindroom.custom_tools.stop_reply",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.string_mapping"
+depends_on = []
+visibility = ["mindroom.tools.custom_api", "mindroom.tools.daytona"]
+
+[[modules]]
+path = "mindroom.tools.tavily"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.telegram"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.terminal"
+depends_on = [
+    "mindroom.custom_tools.terminal",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.thread_model"
+depends_on = [
+    "mindroom.custom_tools.thread_model",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.thread_move"
+depends_on = [
+    "mindroom.custom_tools.thread_move",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.thread_resolution"
+depends_on = [
+    "mindroom.custom_tools.thread_resolution",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.thread_snooze"
+depends_on = [
+    "mindroom.custom_tools.thread_snooze",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.thread_summary"
+depends_on = [
+    "mindroom.custom_tools.thread_summary",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.thread_tags"
+depends_on = [
+    "mindroom.custom_tools.thread_tags",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.todo"
+depends_on = ["mindroom.custom_tools.todo", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.todoist"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.trafilatura"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.trello"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.twilio"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.unsplash"
+depends_on = [
+    "mindroom.custom_tools.unsplash",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.update_awareness"
+depends_on = [
+    "mindroom.custom_tools.update_awareness",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.usage_stats"
+depends_on = [
+    "mindroom.custom_tools.usage_stats",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.webex"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.website"
+depends_on = ["mindroom.custom_tools.website", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.whatsapp"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.wikipedia"
+depends_on = [
+    "mindroom.custom_tools.wikipedia",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.workflow"
+depends_on = [
+    "mindroom.custom_tools.workflow",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.x"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.yfinance"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.youtube"
+depends_on = ["mindroom.custom_tools.youtube", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+
+[[modules]]
+path = "mindroom.tools.zendesk"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.zep"
+depends_on = [
+    "mindroom.failure_text",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.tools.zoom"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.tools.native_helpers",
+]
+
+# Custom tools. Keep custom_tools/__init__.py undeclared, and hold config_manager until config lifecycle is extracted.
+
+[[modules]]
+path = "mindroom.custom_tools.agent_manager"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.attachments",
+    "mindroom.media_delivery",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.arxiv"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.atlassian"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.custom_tools.atlassian_client",
+    "mindroom.custom_tools.atlassian_spaces",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.llm",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tools.native_helpers",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.atlassian",
+    "mindroom.oauth.client",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.atlassian_client"
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.oauth.atlassian",
+]
+visibility = ["mindroom.custom_tools.atlassian"]
+
+[[modules]]
+path = "mindroom.custom_tools.atlassian_spaces"
+depends_on = []
+visibility = ["mindroom.custom_tools.atlassian", "mindroom.tools.atlassian"]
+
+[[modules]]
+path = "mindroom.custom_tools.baidusearch"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.browser"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.browser.profile_locks",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.desktop",
+    "mindroom.custom_tools.desktop_attachment",
+    "mindroom.desktop.client",
+    "mindroom.desktop.configuration",
+    "mindroom.desktop.media",
+    "mindroom.desktop.playwright_mcp",
+    "mindroom.desktop.protocol",
+    "mindroom.file_access",
+    "mindroom.matrix.olm_to_device",
+    "mindroom.media_delivery",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.media_attachments",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.worker_computer.browser_bundle",
+    "mindroom.worker_computer.browser_proxy",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.calculator"
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tools.native_helpers"]
+
+[[modules]]
+path = "mindroom.custom_tools.callback_manager"
+depends_on = [
+    "mindroom.config.validation",
+    "mindroom.constants",
+    "mindroom.custom_tools.external_trigger_context",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.cartesia"
+depends_on = ["mindroom.llm", "mindroom.tool_system.authoring", "mindroom.tool_system.tool_function"]
+
+[[modules]]
+path = "mindroom.custom_tools.claude_agent"
+depends_on = [
+    "mindroom.helper_usage",
+    "mindroom.llm",
+    "mindroom.providers.names",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.compact_context"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.history.manual",
+    "mindroom.history.types",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.contacts"
+depends_on = [
+    "mindroom.contacts.flow",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.ddgs_search"
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tools.native_helpers"]
+visibility = ["mindroom.tools.duckduckgo", "mindroom.tools.googlesearch"]
+
+[[modules]]
+path = "mindroom.custom_tools.desktop_attachment"
+depends_on = ["mindroom.matrix.runtime_media", "mindroom.tool_system.runtime_context"]
+visibility = ["mindroom.custom_tools.browser", "mindroom.custom_tools.desktop"]
+
+[[modules]]
+path = "mindroom.custom_tools.dynamic_tools"
+depends_on = [
+    "mindroom.config.tool_aliases",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.llm",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.tool_access",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.e2b"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.file_access",
+    "mindroom.llm",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.eleven_labs"
+depends_on = ["mindroom.llm", "mindroom.tool_system.authoring", "mindroom.tool_system.tool_function"]
+
+[[modules]]
+path = "mindroom.custom_tools.external_trigger_context"
+depends_on = ["mindroom.tool_system.runtime_context"]
+visibility = ["mindroom.custom_tools.callback_manager", "mindroom.custom_tools.triggers"]
+
+[[modules]]
+path = "mindroom.custom_tools.fal"
+depends_on = ["mindroom.llm", "mindroom.tool_system.authoring", "mindroom.tool_system.tool_function"]
+
+[[modules]]
+path = "mindroom.custom_tools.filesystem"
+depends_on = [
+    "mindroom.git_invocation",
+    "mindroom.llm",
+    "mindroom.media_delivery",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.gemini_media"
+depends_on = ["mindroom.llm", "mindroom.tool_system.authoring", "mindroom.tool_system.tool_function"]
+visibility = ["mindroom.tools.gemini"]
+
+[[modules]]
+path = "mindroom.custom_tools.giphy"
+depends_on = ["mindroom.llm", "mindroom.tool_system.authoring", "mindroom.tool_system.tool_function"]
+
+[[modules]]
+path = "mindroom.custom_tools.github"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.tool_system.authoring",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.client",
+    "mindroom.oauth.github",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.gmail"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.google_service",
+    "mindroom.file_access",
+    "mindroom.tools.native_helpers",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.google",
+    "mindroom.config.legacy_fields",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.google_bigquery"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.google_service",
+    "mindroom.tools.native_helpers",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.google",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.google_calendar"
+depends_on = [
+    "mindroom.custom_tools.google_service",
+    "mindroom.tools.native_helpers",
+    "mindroom.oauth.google",
+    "mindroom.config.legacy_fields",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.google_docs"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.google_service",
+    "mindroom.tools.native_helpers",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.google",
+    "mindroom.config.legacy_fields",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.google_drive"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.bounded_bytes",
+    "mindroom.config.main",
+    "mindroom.custom_tools.google_service",
+    "mindroom.file_access",
+    "mindroom.llm",
+    "mindroom.oauth.credential_lifecycle",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.toolkits",
+    "mindroom.tools.native_helpers",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.google",
+    "mindroom.oauth.service",
+    "mindroom.config.legacy_fields",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.google_scholar"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.google_service"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.oauth.client",
+    "mindroom.oauth.google",
+]
+visibility = [
+    "mindroom.custom_tools.gmail",
+    "mindroom.custom_tools.google_bigquery",
+    "mindroom.custom_tools.google_calendar",
+    "mindroom.custom_tools.google_docs",
+    "mindroom.custom_tools.google_drive",
+    "mindroom.custom_tools.google_sheets",
+    "mindroom.custom_tools.google_tasks",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.google_sheets"
+depends_on = [
+    "mindroom.custom_tools.google_service",
+    "mindroom.tools.native_helpers",
+    "mindroom.oauth.google",
+    "mindroom.config.legacy_fields",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.google_tasks"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.google_service",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.google",
+    "mindroom.config.legacy_fields",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.hackernews"
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tools.native_helpers"]
+
+[[modules]]
+path = "mindroom.custom_tools.homeassistant"
+depends_on = [
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.invite_router"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.lumalabs"
+depends_on = ["mindroom.llm", "mindroom.tool_system.authoring", "mindroom.tool_system.tool_function"]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_files"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.file_access",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_graph"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.file_access",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+    "mindroom.tools.native_helpers",
+    "mindroom.oauth.client",
+    "mindroom.oauth.microsoft",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
+]
+visibility = [
+    "mindroom.custom_tools.microsoft_files",
+    "mindroom.custom_tools.microsoft_meetings",
+    "mindroom.custom_tools.microsoft_onenote",
+    "mindroom.custom_tools.microsoft_people",
+    "mindroom.custom_tools.microsoft_sharepoint",
+    "mindroom.custom_tools.microsoft_teams",
+    "mindroom.custom_tools.microsoft_todo",
+    "mindroom.custom_tools.outlook_calendar",
+    "mindroom.custom_tools.outlook_mail",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_meetings"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_onenote"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_people"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_sharepoint"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_teams"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.microsoft_todo"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.oauth_connections"
+depends_on = ["mindroom.oauth.reset", "mindroom.tool_system.authoring", "mindroom.tool_system.runtime_context"]
+
+[[modules]]
+path = "mindroom.custom_tools.outlook_calendar"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.outlook_mail"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.file_access",
+    "mindroom.llm",
+    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.pubmed"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.react"
+depends_on = [
+    "mindroom.custom_tools.matrix_conversation_operations",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tool_system.authoring",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.reasoning"
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tool_system.invocation"]
+
+[[modules]]
+path = "mindroom.custom_tools.scheduler"
+depends_on = ["mindroom.scheduling.tasks", "mindroom.tool_system.authoring", "mindroom.tool_system.runtime_context"]
+
+[[modules]]
+path = "mindroom.custom_tools.script"
+depends_on = [
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.searxng"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.self_config"
+depends_on = [
+    "mindroom.config.agent",
+    "mindroom.config.main",
+    "mindroom.config.tool_aliases",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.tool_function",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.serpapi"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.serper"
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tools.native_helpers"]
+
+[[modules]]
+path = "mindroom.custom_tools.shared_directories"
+depends_on = [
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.skill_manage"
+depends_on = ["mindroom.skill_learning.tools", "mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.sleep"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.spotify"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.tool_system.authoring",
+    "mindroom.tools.native_helpers",
+    "mindroom.credentials.manager",
+    "mindroom.oauth.client",
+    "mindroom.oauth.providers",
+    "mindroom.oauth.service",
+    "mindroom.oauth.spotify",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.terminal"
+depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.approval.tool_approval",
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.terminal.client",
+    "mindroom.terminal.session",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.thread_summary"
+depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.thread_summary.notices",
+    "mindroom.tool_system.authoring",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.todo"
+depends_on = [
+    "mindroom.custom_tools.todo_state",
+    "mindroom.custom_tools.todo_template_render",
+    "mindroom.path_confinement",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.skills",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.todo_poke"
+depends_on = ["mindroom.constants", "mindroom.custom_tools.todo_state"]
+visibility = ["mindroom.orchestration.todo_poke_runtime"]
+
+[[modules]]
+path = "mindroom.custom_tools.todo_state"
+depends_on = []
+visibility = [
+    "mindroom.custom_tools.todo",
+    "mindroom.custom_tools.todo_poke",
+    "mindroom.orchestration.todo_poke_runtime",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.todo_template_render"
+depends_on = []
+visibility = ["mindroom.custom_tools.todo"]
+
+[[modules]]
+path = "mindroom.custom_tools.tool_payloads"
+depends_on = ["mindroom.tool_system.runtime_context"]
+visibility = [
+    "mindroom.agents",
+    "mindroom.custom_tools.atlassian",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.callback_manager",
+    "mindroom.custom_tools.chat_ui",
+    "mindroom.custom_tools.desktop",
+    "mindroom.custom_tools.dynamic_tools",
+    "mindroom.custom_tools.matrix_api",
+    "mindroom.custom_tools.matrix_message",
+    "mindroom.custom_tools.matrix_room",
+    "mindroom.custom_tools.matrix_voice_message",
+    "mindroom.custom_tools.microsoft_graph",
+    "mindroom.custom_tools.react",
+    "mindroom.custom_tools.report_publishing",
+    "mindroom.custom_tools.script",
+    "mindroom.custom_tools.shared_directories",
+    "mindroom.custom_tools.slack",
+    "mindroom.custom_tools.stop_reply",
+    "mindroom.custom_tools.thread_model",
+    "mindroom.custom_tools.thread_move",
+    "mindroom.custom_tools.thread_resolution",
+    "mindroom.custom_tools.thread_snooze",
+    "mindroom.custom_tools.thread_summary",
+    "mindroom.custom_tools.thread_tags",
+    "mindroom.custom_tools.triggers",
+    "mindroom.custom_tools.usage_stats",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.unsplash"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.update_awareness"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.usage_stats"
+depends_on = [
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tools.native_helpers",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.website"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.wikipedia"
+depends_on = ["mindroom.tool_system.authoring"]
+
+[[modules]]
+path = "mindroom.custom_tools.youtube"
+depends_on = ["mindroom.tool_system.authoring", "mindroom.tools.native_helpers"]
 
 # Matrix modules.
 
@@ -12531,7 +15229,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.config.validation"
-depends_on = []
+depends_on = ["mindroom.credentials.manager"]
 
 [[modules]]
 path = "mindroom.config.voice"

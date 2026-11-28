@@ -389,6 +389,27 @@ async def test_selected_schema_builds_only_selected_toolkit(
 
 
 @pytest.mark.asyncio
+async def test_advertised_delegation_reports_missing_requester_authorization(context: AgentToolContext) -> None:
+    """MCP can discover an explicitly listed delegate tool but cannot authorize its child turn."""
+    config = context.config.model_copy(deep=True)
+    config.agents["personal"].tools = ["delegate"]
+    config.agents["personal"].delegate_to = ["personal"]
+    context = replace(context, config=config)
+
+    advertised = await gateway.search_tools(context, toolkit="delegate")
+    assert "error" not in advertised
+    assert "run_subagent" in {item["function"] for item in advertised["results"]}
+
+    result = await gateway.invoke_tool(
+        context,
+        toolkit="delegate",
+        function="run_subagent",
+        arguments={"agent_name": "personal", "task": "Review the plan", "title": "Plan review"},
+    )
+    assert result == {"result": "Cannot delegate to 'personal': requester authorization is unavailable."}
+
+
+@pytest.mark.asyncio
 async def test_selected_schema_prepares_only_selected_function(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,

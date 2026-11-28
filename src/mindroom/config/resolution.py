@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_policy import PolicyInputs, ResolvedAgentPolicy, resolve_agent_policy
+from mindroom.config.authored_overrides import apply_authored_overrides
 from mindroom.config.automations import Automation, ExplorationAutomation
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, EffectiveToolConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -257,9 +258,6 @@ def authored_tool_entries(config: Config, agent_name: str) -> tuple[EffectiveToo
     These are what the config asks for; which of them a runtime can build is the tool registry's answer
     (`AgentTools.tool_names`). The approved-egress switch adds its tool to the defaults of every agent that takes them.
     """
-    # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
-    from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
-
     agent = config.get_agent(agent_name)
     defaults = {entry.name: entry for entry in config.defaults.tools} if agent.include_default_tools else {}
     named = {entry.name for entry in agent.tools}

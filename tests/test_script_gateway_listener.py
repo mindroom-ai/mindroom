@@ -240,7 +240,7 @@ async def test_listener_shutdown_is_bounded_while_a_request_hangs(tmp_path: Path
             serving.set()
             await asyncio.Event().wait()
 
-    with patch("mindroom.api.script_gateway._LISTENER_SHUTDOWN_GRACE_SECONDS", 1):
+    with patch("mindroom.api.listener._LISTENER_SHUTDOWN_GRACE_SECONDS", 1):
         owner = asyncio.create_task(own_listener())
         await serving.wait()
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
@@ -281,7 +281,7 @@ async def test_listener_closes_when_the_context_body_raises(tmp_path: Path) -> N
 async def test_listener_is_absent_without_a_configured_port(tmp_path: Path) -> None:
     """Deployments that do not opt in keep a single primary API listener."""
     runtime_paths = _runtime_paths(tmp_path, {})
-    with patch("mindroom.api.script_gateway.socket.create_server") as create_server:
+    with patch("mindroom.api.listener.socket.create_server") as create_server:
         async with serve_script_gateway_listener(
             runtime_paths,
             host="127.0.0.1",

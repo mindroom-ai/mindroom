@@ -40,7 +40,6 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
-    "apply_authored_overrides",
     "builtin_tool_registry",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import mindroom.tools  # noqa: F401
 from mindroom import constants
-from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, standard_cli_eligible, wrap_native_shell_window
+from mindroom.agent_cli.cli_shell_window import STANDARD_CLI_NOTE, standard_cli_eligible, wrap_native_shell_window
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import (
@@ -103,7 +103,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.config.resolution import ResolvedAgent
-    from mindroom.delegation.state import SubagentPersona
+    from mindroom.delegation.state import DelegationExecutor, SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.provider import ModelProvider
@@ -1165,6 +1165,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     plugins: ConfigPlugins,
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
+    delegation_executor: DelegationExecutor | None = None,
 ) -> _AgentToolAssembly:
     """Assemble the toolkits one agent instance offers and its dynamic-tool visibility.
 
@@ -1262,6 +1263,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 persona=persona,
                 deferred_toolkits=searched_toolkits,
                 calls_as_jobs=toolkit_calls_as_jobs,
+                delegation_executor=delegation_executor,
             )
         if toolkit is None:
             return None
@@ -1848,6 +1850,7 @@ def create_agent(
     persona: SubagentPersona | None = None,
     tool_names: tuple[str, ...] | None = None,
     provider: ModelProvider | None = None,
+    delegation_executor: DelegationExecutor | None = None,
 ) -> AgentBuild:
     """Build an agent from configuration: its model, tools, prompt, request settings, and surface.
 
@@ -1862,6 +1865,7 @@ def create_agent(
             unless a persona names the bases it keeps.
         model: The model this agent's turn runs, which the caller resolved for the turn.
         provider: ``model``'s provider, when the caller already built it for the turn.
+        delegation_executor: Execution callbacks for the delegation paths this build supports.
         plugins: The plugin view the caller captured for this operation: the build's tools, placement, skills, and
             tool hooks all come from it, deferred toolkits included.
         include_interactive_questions: Whether to include the interactive
@@ -2001,6 +2005,7 @@ def create_agent(
         plugins=plugins,
         knowledge=enabled_knowledge,
         skills=offered_skills,
+        delegation_executor=delegation_executor,
     )
 
     role_context = _build_agent_role_context(

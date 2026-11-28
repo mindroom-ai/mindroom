@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.embeddings.embedder_health import (
+from mindroom.embeddings.health_state import (
     EmbedderHealthRecorder,
     capture_embedder_health_recorder,
 )

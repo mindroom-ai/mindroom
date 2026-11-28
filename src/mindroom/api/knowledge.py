@@ -28,10 +28,8 @@ from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as 
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.redaction import redact_credentials_in_text
-from mindroom.knowledge.refresh_runner import (
-    knowledge_binding_mutation_lock,
-    publish_file_mode_source_metadata_for_base,
-)
+from mindroom.knowledge.refresh_runner import knowledge_binding_mutation_lock
+from mindroom.knowledge.refresh_worker import publish_file_mode_source_metadata_for_base
 from mindroom.knowledge.status import (
     KnowledgeCandidateStatus,
     KnowledgeIndexStatus,

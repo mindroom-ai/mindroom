@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.config.egress_broker import EgressService, validate_egress_service_name
-from mindroom.egress_broker.presets import EGRESS_PRESETS
+from mindroom.config.egress_presets import EGRESS_PRESETS
 from mindroom.egress_broker.rules import config_covers_rule
 from mindroom.egress_broker.secrets import (
     delete_egress_document,

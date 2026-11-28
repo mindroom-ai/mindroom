@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import stat
-import time
 from contextlib import ExitStack, closing
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import ModelProvenance
-from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database
 from mindroom.session_storage.legacy_session_columns import upgrade_layout
@@ -31,9 +27,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelIdentity
-    from mindroom.llm.usage import MessageMetrics
-    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -132,46 +125,10 @@ def agent_session_database_path(
     return TableNames(agent_name).database_path(resolved_storage.session_state_root)
 
 
-def save_compaction_usage(
-    store: ConversationStore,
-    *,
-    session_id: str,
-    requester_id: str | None,
-    model: ModelIdentity,
-    usage: MessageMetrics,
-    initial_session: ConversationSession | None,
-) -> None:
-    """Persist one summary response's returned counters, with the model that answered it, apart from the conversation."""
-    created_at = time.time()
-    summary = HelperUsage(
-        run_id=str(uuid4()),
-        model=model.id,
-        provider=model.provider,
-        metrics=RunMetrics(tokens=usage.tokens),
-        requests=(
-            RequestUsage(
-                created_at=created_at,
-                metrics=usage,
-                model=ModelProvenance(model_id=model.id, provider=model.provider),
-            ),
-        ),
-        created_at=created_at,
-    )
-    store.save_independent_usage(
-        session_id=session_id,
-        usage_id=f"compaction:{summary.run_id}",
-        kind="compaction_summary",
-        requester_id=requester_id,
-        initial_session=initial_session,
-        usage=summary,
-    )
-
-
 __all__ = [
     "agent_session_database_path",
     "create_agent_state_storage",
     "create_session_storage",
     "create_state_storage",
     "prepare_conversation_database",
-    "save_compaction_usage",
 ]

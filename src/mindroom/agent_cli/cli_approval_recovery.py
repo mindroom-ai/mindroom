@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.approval import CliApprovalCall
     from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import ReportedCall
@@ -85,6 +86,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     authorize: Callable[[PreparedAgentToolBinding], Awaitable[None]],
     progress: ProgressPublisher | None,
+    run_child: ChildResponseRunner | None = None,
 ) -> CompletedApprovalRun | PausedAttempt | CliFollowUpTurn:
     """Execute the exact approved hidden call; the old Bash process never resumes.
 
@@ -180,6 +182,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 context_documents=minimal_context_documents(build),
                 delegation_depth=payload.delegation_depth,
                 refresh_scheduler=refresh_scheduler,
+                run_child=run_child,
             )
             recovery_owner.checkpoint.resume_saved_parent(payload.parent_bash_call_id)
         return binding
@@ -202,6 +205,9 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     await presentation.publish(progress)
     try:
         if external is not None:
+            if run_child is None:
+                msg = "CLI delegation recovery requires a child response runner"
+                raise RuntimeError(msg)
             binding = await prepare()
             await authorize(binding)
             outcome = await advance_cli_delegation(
@@ -212,6 +218,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 refresh_scheduler=refresh_scheduler,
                 approval_calls=continuation.calls,
                 on_event=on_child_event,
+                run_child=run_child,
             )
             if isinstance(outcome, PausedAttempt):
                 for tool in outcome.tools:

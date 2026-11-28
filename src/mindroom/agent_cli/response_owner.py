@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.lifetime import CliTurnLifetime
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
+    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
@@ -73,6 +74,7 @@ def bind_response_owner(
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     reload_ends_run: bool,
+    run_child: ChildResponseRunner | None = None,
 ) -> LiveTurnTools:
     """Register the response's owner and grant on its first attempt, or rebind its catalog after a rebuild.
 
@@ -122,6 +124,7 @@ def bind_response_owner(
         output_file_policy=output_file_policy,
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
+        run_child=run_child,
     )
     lifetime.register(new_owner, runtime.orchestrator.agent_cli_registry)
     now = time.time_ns()
