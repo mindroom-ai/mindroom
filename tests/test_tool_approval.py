@@ -1971,6 +1971,43 @@ async def test_starter_config_asks_before_config_manager_changes_configuration(
 
 
 @pytest.mark.asyncio
+async def test_shell_command_allowlist_only_approves_default_cwd_or_an_explicitly_matched_workdir(
+    tmp_path: Path,
+) -> None:
+    """Changing the cwd falls through the command-only allowlist, but a rule can allow a named directory."""
+    command = {"args": "cat report.txt"}
+    config = Config(
+        tool_approval=ToolApprovalConfig(
+            rules=[
+                ApprovalRuleConfig(match="run_shell_command", arguments=command, action="auto_approve"),
+                ApprovalRuleConfig(
+                    match="run_shell_command",
+                    arguments={**command, "workdir": "reports"},
+                    action="auto_approve",
+                ),
+                ApprovalRuleConfig(match="run_shell_command", action="require_approval", timeout_days=2),
+            ],
+        ),
+    )
+    paths = test_runtime_paths(tmp_path)
+    for arguments in (command, {**command, "workdir": None}, {**command, "workdir": "reports"}):
+        assert await evaluate_tool_approval(config, paths, "run_shell_command", arguments, "mind", None) == (
+            False,
+            7 * 86400,
+        )
+    # Even spelling the default cwd explicitly requires a matching rule.
+    for workdir in ("/etc", "."):
+        arguments = {**command, "workdir": workdir}
+        assert await evaluate_tool_approval(config, paths, "run_shell_command", arguments, "mind", None) == (
+            True,
+            2 * 86400,
+        )
+        assert tool_may_require_approval(config, "run_shell_command", fixed_arguments=arguments)
+    assert tool_may_require_approval(config, "run_shell_command", fixed_arguments=command)
+    assert not tool_may_require_approval(config, "run_shell_command", fixed_arguments={**command, "workdir": None})
+
+
+@pytest.mark.asyncio
 async def test_tool_approval_rule_matching_uses_first_matching_action_for_listing(tmp_path: Path) -> None:
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(

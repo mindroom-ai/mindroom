@@ -654,12 +654,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             args: str | list[str],
             tail: int = 100,
             timeout: int | None = None,  # noqa: ASYNC109
-            workdir: str | None = None,
             worker: str | None = None,
             resource_profile: ScriptResourceProfileName | None = None,
             sandbox: bool | None = None,
             mount_dir: str | None = None,
             mount_read_only: bool | None = None,
+            workdir: str | None = None,
         ) -> str | ToolOutcome | ToolOutputFileHandled:
             """Run a command via non-login Bash (prepared env; pass ``["bash", "-lc", cmd]`` only if login startup is needed).
 
@@ -676,12 +676,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 args: Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax).
                 tail: Output lines to return.
                 timeout: Stop command + process group after N seconds (<= 120 inline; null/> 120 backgrounds at 120s).
-                workdir: Existing directory for this call (absolute or relative to default CWD; ~ uses command HOME).
                 worker: Named worker (1-32 lowercase letters/digits/hyphens); null uses normal worker.
                 resource_profile: Named worker size (small/standard/large; set on first call; null = default).
                 sandbox: Run named worker in isolated sandbox (scratch only unless mount_dir set; no creds/secrets/CLI grants).
                 mount_dir: Non-hidden workspace subdir to mount in sandbox (e.g. "scratch/job1"; "." and dot-segments refused; implies sandbox; writable mounts can still edit repo-local files like .git/hooks).
                 mount_read_only: Mount mount_dir read-only (requires mount_dir).
+                workdir: Existing directory for this call (absolute or relative to default CWD; ~ uses command HOME).
 
             Returns:
                 The command output or an error message.

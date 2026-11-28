@@ -1037,7 +1037,8 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
         async with execution_resources(response=True):
             normal = await shell("echo hi")
             first = await shell("echo hi", worker="e2e-0", resource_profile="large")
-            again = await shell(args="echo hi", worker="e2e-0")
+            # The fourth positional argument still names a worker, not the newly added workdir.
+            again = await shell("echo hi", 100, 30, "e2e-0")
             named_endpoint = backend.workers[backend.specs[-1].worker_key].endpoint
 
     assert (normal, first, again) == (
@@ -1051,8 +1052,9 @@ async def test_a_shell_call_runs_in_the_worker_it_names(
     assert pinned_worker_state_scope_key(named_spec.worker_key) == target.worker_key
     assert (named_spec.state_scope_worker_key, named_spec.resource_profile) == (target.worker_key, "large")
     # Each request goes to its own worker and names that worker's key, with the agent's own scope and identity.
-    (normal_url, normal_post), (named_url, named_post), _ = posts
-    assert normal_url != named_url == named_endpoint
+    (normal_url, normal_post), (named_url, named_post), (again_url, again_post) = posts
+    assert normal_url != named_url == again_url == named_endpoint
+    assert again_post["args"] == ["echo hi", 100, 30, "e2e-0"]
     assert (named_post["worker_key"], named_post["worker_scope"]) == (named_spec.worker_key, "user_agent")
     assert named_post["execution_identity"] == normal_post["execution_identity"]
     assert await _retired(backend) == [named_spec.worker_key]
@@ -1386,7 +1388,7 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
 
     offered = set(function.parameters["properties"])
     assert ({"worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only"} <= offered) is enabled
-    assert {"args", "tail", "timeout"} <= offered
+    assert {"args", "tail", "timeout", "workdir"} <= offered
     assert ("mindroom-agent workers run" in (function.description or "")) is enabled
 
 

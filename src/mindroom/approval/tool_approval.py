@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.manager import (
@@ -146,6 +147,17 @@ def _load_script_module(
 _APPROVED_EGRESS_RULE = ApprovalRuleConfig(match="request_network_access", action="require_approval")
 
 
+def _requires_default_workdir(tool_name: str, rule: ApprovalRuleConfig) -> bool:
+    """Treat command allowlists as scoped to the default cwd unless they name a workdir matcher."""
+    return (
+        tool_name == SHELL_FUNCTION
+        and rule.action == "auto_approve"
+        and rule.arguments is not None
+        and "args" in rule.arguments
+        and "workdir" not in rule.arguments
+    )
+
+
 def _candidate_rules(
     config: Config,
     tool_name: str,
@@ -165,6 +177,10 @@ def _candidate_rules(
             if arg_match == "no":
                 continue
             arguments_unconditional = arg_match == "full"
+            if _requires_default_workdir(tool_name, rule):
+                if fixed_arguments.get("workdir") is not None:
+                    continue
+                arguments_unconditional &= "workdir" in fixed_arguments
         else:
             arguments_unconditional = rule.arguments is None
         applicable.append(rule)
@@ -180,12 +196,14 @@ def _matching_tool_approval_rule(
     agent_name: str | None = None,
     arguments: Mapping[str, Any] | None = None,
 ) -> ApprovalRuleConfig | None:
+    overrides_workdir = arguments is not None and arguments.get("workdir") is not None
     rule = next(
         (
             candidate
             for candidate in config.tool_approval.rules
             if candidate.matches_tool(tool_name)
             and (candidate.agents is None or (agent_name is not None and candidate.matches_agent(agent_name)))
+            and not (overrides_workdir and _requires_default_workdir(tool_name, candidate))
             and (candidate.arguments is None or (arguments is not None and candidate.matches_arguments(arguments)))
         ),
         None,

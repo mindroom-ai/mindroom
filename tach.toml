@@ -525,6 +525,7 @@ visibility = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.tailnet_ssh.links",
     "mindroom.terminal.client",
+    "mindroom.approval.tool_approval",
     "mindroom.approval.tool_owners",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
@@ -1615,6 +1616,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval.tool_approval"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
     "mindroom.approval.auto_approve_windows",
     "mindroom.approval.manager",
     "mindroom.config.approval",
