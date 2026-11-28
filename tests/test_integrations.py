@@ -9,8 +9,13 @@ from fastapi import FastAPI
 
 from mindroom import integrations
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.integrations import Integration, bind_integrations, reply_mirror_for, unbind_integrations
-from mindroom.slack.integration import SLACK_INTEGRATION
+from mindroom.integrations import (
+    SLACK_INTEGRATION,
+    Integration,
+    bind_integrations,
+    reply_mirror_for,
+    unbind_integrations,
+)
 
 
 def test_bind_and_unbind_run_in_registry_order_and_return_the_bound_runtimes(monkeypatch: pytest.MonkeyPatch) -> None:

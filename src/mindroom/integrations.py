@@ -1,9 +1,11 @@
-"""The built-in integration registry: how core plugs each integration into the API, its lifecycle, replies and config."""
+"""The built-in integration registry: how core plugs each integration into the API, its lifecycle, and replies."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from mindroom.slack.integration import bind_slack, mirror_slack_reply, unbind_slack
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
@@ -23,21 +25,31 @@ class Integration:
     """The hooks one built-in integration plugs into core with."""
 
     name: str
-    # Returns the public routes, which authenticate their own requests.
-    # Config validation reads the registry, so an integration loads its route and runtime on first use, never at import.
+    # Returns the public routes, which authenticate their own requests; they load on first use, never at import.
     router: Callable[[], APIRouter]
     bind: Callable[[FastAPI, Mapping[str, AgentBot], AgentReplyMembershipIndex, ReactiveTriggerService | None], None]
     unbind: Callable[[FastAPI], object | None]
     # Returns the coroutine that passes a final agent reply on, or None when the reply is not for this integration.
     reply_mirror: Callable[[MessageEnvelope, str, Config, RuntimePaths], Coroutine[Any, Any, None] | None]
-    validate_config: Callable[[Config], None]
-    adapt_created_agent_tools: Callable[[list[Any]], None]
+
+
+def _slack_events_router() -> APIRouter:
+    # why-lazy: the route module loads FastAPI and the Slack delivery stack, which importing the registry must not.
+    from mindroom.api.slack_events import router  # noqa: PLC0415
+
+    return router
+
+
+SLACK_INTEGRATION = Integration(
+    name="slack",
+    router=_slack_events_router,
+    bind=bind_slack,
+    unbind=unbind_slack,
+    reply_mirror=mirror_slack_reply,
+)
 
 
 def _integrations() -> tuple[Integration, ...]:
-    # Deferred: `slack.integration` imports `Integration` from this module.
-    from mindroom.slack.integration import SLACK_INTEGRATION  # noqa: PLC0415
-
     return (SLACK_INTEGRATION,)
 
 
@@ -78,15 +90,3 @@ def reply_mirror_for(
         if (mirror := integration.reply_mirror(envelope, response_text, config, runtime_paths)) is not None:
             return mirror
     return None
-
-
-def validate_integrations(config: Config) -> None:
-    """Run every integration's config checks, which raise `ValueError`."""
-    for integration in _integrations():
-        integration.validate_config(config)
-
-
-def adapt_created_agent_tools(tools: list[Any]) -> None:
-    """Let every integration edit a created agent's raw tool list in place."""
-    for integration in _integrations():
-        integration.adapt_created_agent_tools(tools)

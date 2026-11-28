@@ -16,7 +16,6 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.metadata import (
     ToolConfigOverrideError,
     ToolInitOverrideError,
-    apply_authored_overrides,
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
@@ -41,7 +40,6 @@ __all__ = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
-    "apply_authored_overrides",
     "builtin_tool_registry",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",

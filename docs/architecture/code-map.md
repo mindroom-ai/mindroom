@@ -44,7 +44,7 @@ Matrix sync callback
 | `orchestrator.py` | MultiAgentOrchestrator - composition root: wires the fleet, services, and reload lifecycle, and applies reload plans |
 | `startup_maintenance.py` | Detached post-sync startup maintenance lifecycle: room/membership setup, runtime support sync, approval-recovery readiness, and best-effort owner orphaned-account cleanup |
 | `room_steward.py` | The steward rule: which running, joined bot does a room's shared invisible work (highest power, ties to the lowest Matrix ID), which one posts where no agent answers, which one has a given Matrix ID, and which bot, while its receive loop has caught up, observes a room's members for reply access |
-| `integrations.py` | The built-in integration registry, the one place core wires an integration's runtime: each integration's public routes, its binding to the live bots and the shutdown drain of what it bound, final-reply mirroring, config checks, and created-agent tool edits |
+| `integrations.py` | The built-in integration registry: public routes loaded on first use, binding to the live bots, unbinding for shutdown drain, and final-reply mirroring |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: the process's one config load (published to the embedded API), queueing, response drain, and update-plan dispatch |
 | `config/load_attempt.py` | The one config-file load attempt that the runtime and the dashboard API share |
@@ -206,6 +206,7 @@ Matrix sync callback
 | `api/egress_credentials.py` | Personal `/api/connections/egress` routes: per-agent services and keys, user services, account connections and opt-ins, and the caller's request log |
 | `api/egress_status.py` | Service status, preset, and request-log responses and the account-connection gate shared by both egress APIs |
 | `config/egress_broker.py` | `egress_broker` config models: services, preset expansion, rules, auth types, and their validation |
+| `config/egress_presets.py` | Built-in service presets shared by config validation, the egress broker, and the egress APIs |
 | `egress_broker/key_access.py` | Who may use and manage an agent's Agent Keys, shared by the Agent Keys pages and secret requests |
 | `secret_requests.py` | In-memory registry of pending secret requests, the card content they post, and the store of temporary secrets requesters gave conversations (in memory, or also one private file each) |
 | `secret_request_cards.py` | The card a secret request posts and the wait for its answer, shared by `request_secret` and `request_temporary_secret` |
@@ -290,6 +291,7 @@ Matrix sync callback
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
+| `config/authored_overrides.py` | Layers authored tool overrides and defines the sentinel that clears an inherited override |
 | `config/resolution.py` | What one agent, team, or scope gets from the config, every inherited value filled in (`resolve_scope`, `resolve_agent`, and one function per fact) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `config/personal_agents.py` | `personal_agents` templates, the roster store, and expansion of roster entries into ordinary agents before config validation |
@@ -720,7 +722,7 @@ Matrix sync callback
 | `slack/events.py` | Pure Slack event handling: the signing-secret check, which Events API messages may wake anyone, the thread keys, which project agent answers an event, and which personal watches an event may be for |
 | `slack/files.py` | Slack file transfers: a download from Slack's file host, refused past 50 MB and written into the workspace's `slack-downloads/` without following links, and the external upload flow, which never sends the token to Slack's presigned upload link |
 | `slack/identity.py` | Maps a Slack author to a MindRoom account: the Slack display name and, for full workspace members whose profile email is in `slack.email_domain`, the Matrix user ID from `slack.matrix_user_id_template`; cached for ten minutes per team and user; also looks up a channel with `conversations.info`, cached the same way for names but fresh for deciding whether the app may act there, and holds that project channel rule |
-| `slack/integration.py` | Slack's entry in the integration registry: the events route, the runtime those events reach bound to the live bots, project-turn reply mirroring, and the Slack config checks; it loads the Slack runtime only on first use, because config validation reads the registry |
+| `slack/integration.py` | Slack's registry hooks: binds events to live bots, unregisters their event source on unbind, and mirrors final project-turn replies without loading Slack delivery at import time |
 | `slack/oauth.py` | The built-in `slack` OAuth provider: each requester's own Slack user token requested as `user_scope`, accepted only from the workspace the bot token belongs to |
 | `slack/render.py` | Plain dictionaries for agents from Slack answers: messages with author names and permalinks, people, conversations, and the display-name rule; Slack message markup as plain text |
 | `slack/delivery.py` | Delivers a Slack event to the project agent answering its channel, while the app is still in it, as the mapped author, then emits personal watch events onto `ReactiveTriggerService`; retries after the route acknowledged, reacts 👀, and sends notices only the author sees |

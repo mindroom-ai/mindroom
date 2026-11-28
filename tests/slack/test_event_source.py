@@ -22,6 +22,7 @@ from mindroom.custom_tools.triggers import TriggersTools
 from mindroom.delivery_replay import DeliveryReplayStore, DeliveryReplayStoreError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_sources import EventSourceContext, EventSourceEmitter
+from mindroom.integrations import SLACK_INTEGRATION
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.reactive_triggers import dispatch as reactive_dispatch
@@ -29,7 +30,7 @@ from mindroom.reactive_triggers.models import ExternalEventSourceSpec, TriggerEv
 from mindroom.reactive_triggers.service import ReactiveTriggerService
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.slack.event_source import SLACK_EVENT_SOURCE_ID, SlackEventSource, _watch_room_problem_from_state
-from mindroom.slack.integration import SLACK_INTEGRATION, bound_slack_runtime
+from mindroom.slack.integration import bound_slack_runtime
 from mindroom.slack.legacy_watch_migration import migrate_legacy_slack_watches
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system.catalog import ToolConfigOverrideError

@@ -45,6 +45,7 @@ from mindroom.event_sources import (
     EventSourceRegistry,
     ValidatedSubscription,
 )
+from mindroom.integrations import SLACK_INTEGRATION
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.matrix.state import MatrixState
@@ -70,7 +71,6 @@ from mindroom.reactive_triggers import (
     matches_external_event,
 )
 from mindroom.reactive_triggers import store as store_mod
-from mindroom.slack.integration import SLACK_INTEGRATION
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, PluginInactiveError
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context

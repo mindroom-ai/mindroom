@@ -29,6 +29,7 @@ __all__ = [
     "MATRIX_MANAGED_ACCOUNT_AUTH_ENV",
     "MATRIX_USER_APPSERVICE_TOKEN_ENV",
     "MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV",
+    "RUNNER_CA_BUNDLE_ENV",
     "SANDBOX_RUNTIME_ENV_BY_KEY",
     "SANDBOX_STARTUP_MANIFEST_PATH_ENV",
     "SESSION_STORAGE_PATH_ENV",
@@ -75,6 +76,8 @@ MATRIX_APPSERVICE_TOKEN_FILE_ENV = "MATRIX_APPSERVICE_TOKEN_FILE"  # noqa: S105 
 # The application-service token that lets an agent act in Matrix as the person it belongs to; only the primary reads it.
 MATRIX_USER_APPSERVICE_TOKEN_ENV = "MATRIX_USER_APPSERVICE_TOKEN"  # noqa: S105 - environment variable name
 MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV = "MATRIX_USER_APPSERVICE_TOKEN_FILE"  # noqa: S105 - environment variable name
+# The env names a sandbox runner reads its CA bundle from; the egress broker points them at its combined bundle.
+RUNNER_CA_BUNDLE_ENV = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO")
 AWS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "access_key": "AWS_ACCESS_KEY_ID",

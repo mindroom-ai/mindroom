@@ -47,7 +47,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.integrations"
-depends_on = ["mindroom.slack.integration"]
+depends_on = ["mindroom.api.slack_events", "mindroom.slack.integration"]
 
 [[modules]]
 path = "mindroom.origins"
@@ -1852,6 +1852,7 @@ depends_on = [
     "mindroom.api.connection_agents",
     "mindroom.api.oauth",
     "mindroom.config.egress_broker",
+    "mindroom.config.egress_presets",
     "mindroom.egress_broker",
 ]
 
@@ -2066,6 +2067,7 @@ depends_on = [
     "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.config.egress_broker",
+    "mindroom.config.egress_presets",
     "mindroom.config.main",
     "mindroom.egress_broker",
     "mindroom.oauth.credential_lifecycle",
@@ -4414,7 +4416,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
-    "mindroom.integrations",
     "mindroom.matrix_identifiers",
     "mindroom.prompt_templates",
     "mindroom.prompts",
@@ -6484,6 +6485,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.metadata"
 depends_on = [
+    "mindroom.config.authored_overrides",
     "mindroom.constants",
     "mindroom.file_access",
     "mindroom.mcp.registry",
@@ -6690,6 +6692,7 @@ path = "mindroom.egress_broker"
 depends_on = [
     "mindroom.atomic_file",
     "mindroom.config.egress_broker",
+    "mindroom.config.egress_presets",
     "mindroom.constants",
     "mindroom.credentials.policy",
     "mindroom.github_app_auth",
@@ -6714,7 +6717,6 @@ visibility = [
     "mindroom.api.frontend",
     "mindroom.api.sandbox_exec",
     "mindroom.api.secret_requests",
-    "mindroom.config.egress_broker",
     "mindroom.custom_tools.egress_credentials",
     "mindroom.orchestrator",
     "mindroom.tool_system.plugins",
@@ -6724,7 +6726,11 @@ visibility = [
 
 [[modules]]
 path = "mindroom.config.egress_broker"
-depends_on = ["mindroom.credentials.policy", "mindroom.egress_broker"]
+depends_on = ["mindroom.credentials.policy", "mindroom.config.egress_presets"]
+
+[[modules]]
+path = "mindroom.config.egress_presets"
+depends_on = []
 
 [[modules]]
 path = "mindroom.custom_tools.egress_credentials"
@@ -6995,15 +7001,19 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.config.authored_overrides"
+depends_on = []
+
+[[modules]]
 path = "mindroom.config.resolution"
 depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.agent_policy",
+    "mindroom.config.authored_overrides",
     "mindroom.config.automations",
     "mindroom.config.models",
     "mindroom.constants",
     "mindroom.history.types",
-    "mindroom.tool_system.catalog",
 ]
 
 [[modules]]
@@ -8158,7 +8168,6 @@ from = ["mindroom.tool_system.registration"]
 expose = [
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
-    "apply_authored_overrides",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",
     "get_tool_by_name",
@@ -8186,7 +8195,6 @@ expose = [
     "ToolMetadataValidationError",
     "ToolStatus",
     "ToolValidationInfo",
-    "apply_authored_overrides",
     "builtin_tool_registry",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",
@@ -11442,9 +11450,7 @@ depends_on = ["mindroom.slack.api", "mindroom.slack.render"]
 [[modules]]
 path = "mindroom.slack.integration"
 depends_on = [
-    "mindroom.api.config_lifecycle",
-    "mindroom.api.slack_events",
-    "mindroom.integrations",
+    "mindroom.api.app_state",
     "mindroom.slack.api",
     "mindroom.slack.delivery",
     "mindroom.slack.event_source",

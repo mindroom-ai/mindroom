@@ -22,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.delivery_replay import DeliveryReplayStore
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.integrations import SLACK_INTEGRATION
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.reactive_triggers import dispatch as reactive_dispatch
@@ -33,7 +34,7 @@ from mindroom.slack import turns
 from mindroom.slack.app import SlackAppCredentials, load_slack_app
 from mindroom.slack.delivery import SlackRuntime, deliver_slack_event
 from mindroom.slack.event_source import SLACK_EVENT_SOURCE_ID, SlackEventSource
-from mindroom.slack.integration import SLACK_INTEGRATION, bound_slack_runtime
+from mindroom.slack.integration import bound_slack_runtime
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths

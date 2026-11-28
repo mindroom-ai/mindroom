@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote, urlsplit
 
 from mindroom.origins import connections_sign_in_enabled
-from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
+from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY, RUNNER_CA_BUNDLE_ENV
 from mindroom.tool_system.tool_environment import git_config_env
 from mindroom.workers.backend import WorkerBackendError
 
@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BROKER_CA_PEM_ENV",
-    "RUNNER_CA_BUNDLE_ENV",
     "EgressAgentScope",
     "apply_runner_ca_bundle",
     "broker_execution_env",
@@ -33,8 +32,6 @@ __all__ = [
 ]
 
 BROKER_CA_PEM_ENV = "MINDROOM_EGRESS_BROKER_CA_PEM"
-# The env names the runner points at the combined CA bundle; NODE_EXTRA_CA_CERTS gets the broker-only file.
-RUNNER_CA_BUNDLE_ENV = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO")
 # Not a secret: the broker ignores it. Clients that drop credentials with an empty password need a value here.
 _PROXY_PASSWORD = "mindroom"  # noqa: S105
 _BASE_NO_PROXY_HOSTS = ("localhost", "127.0.0.1", "::1", ".svc", ".cluster.local")

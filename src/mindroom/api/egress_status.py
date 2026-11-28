@@ -18,6 +18,7 @@ from mindroom.config.egress_broker import (
     EgressService,
     GitHubRepositoryAccess,
 )
+from mindroom.config.egress_presets import EGRESS_PRESETS
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
@@ -29,7 +30,6 @@ from mindroom.egress_broker.oauth_source import (
     shared_worker_oauth,
     shared_worker_unavailable_status,
 )
-from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthAccess, OAuthStatus, service_status
 from mindroom.egress_broker.user_services import (
     MAX_RULES_PER_SERVICE,
