@@ -18,6 +18,8 @@ from mindroom.desktop.accessibility import (
     AccessibilityError,
     AccessibilityState,
     DesktopRect,
+    ElementActionTarget,
+    KeyboardTarget,
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError
 from mindroom.desktop.provider import (
@@ -138,6 +140,8 @@ class FakeAccessibilityBackend:
     """Return one state-bound app window for provider fallback tests."""
 
     window: DesktopRect = field(default_factory=lambda: DesktopRect(100, 50, 800, 600))
+    process_id: int | None = 42
+    window_id: int | None = 3
     element_bounds: DesktopRect | None = None
     calls: list[tuple[str, object]] = field(default_factory=list)
     keyboard_focus_checks_left: int | None = None
@@ -158,7 +162,7 @@ class FakeAccessibilityBackend:
         """Record capture validation and return the current app window."""
         self.calls.append(("prepare_capture", (app_id, state_id)))
         state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
-        return AccessibilityCapture(state, 42)
+        return AccessibilityCapture(state, self.process_id, window_id=self.window_id)
 
     def prepare_fallback(
         self,
@@ -170,14 +174,15 @@ class FakeAccessibilityBackend:
         """Record validation and return the current app window and its process."""
         self.calls.append(("prepare_fallback", (app_id, state_id)))
         self.fallback_window_flags.append(("fallback", allow_window_fallback))
-        return AccessibilityCapture(AccessibilityState(state_id, app_id, "Editor", self.window, (), False), 42)
+        state = AccessibilityState(state_id, app_id, "Editor", self.window, (), False)
+        return AccessibilityCapture(state, self.process_id, window_id=self.window_id)
 
     def element_for_action(
         self,
         app_id: str,
         state_id: str,
         element_index: int,
-    ) -> tuple[AccessibilityElement, int | None]:
+    ) -> ElementActionTarget:
         """Record validation and return one element at the configured bounds and its process."""
         self.calls.append(("element_for_action", (app_id, state_id, element_index)))
         element = AccessibilityElement(
@@ -193,7 +198,7 @@ class FakeAccessibilityBackend:
             bounds=self.element_bounds,
             actions=(),
         )
-        return element, 42
+        return ElementActionTarget(element, self.process_id, window_id=self.window_id, window=self.window)
 
     def prepare_keyboard(
         self,
@@ -201,8 +206,8 @@ class FakeAccessibilityBackend:
         state_id: str,
         *,
         allow_window_fallback: bool = False,
-    ) -> Callable[[], None]:
-        """Record validation and return a focus guard that fails once its allowed checks run out."""
+    ) -> KeyboardTarget:
+        """Record validation and return a target guard that fails once its allowed checks run out."""
         self.calls.append(("prepare_keyboard", (app_id, state_id)))
         self.fallback_window_flags.append(("keyboard", allow_window_fallback))
 
@@ -214,7 +219,12 @@ class FakeAccessibilityBackend:
                     raise AccessibilityActionOutcomeUnknownError(msg)
                 self.keyboard_focus_checks_left -= 1
 
-        return guard
+        return KeyboardTarget(
+            guard=guard,
+            process_id=self.process_id,
+            window_id=self.window_id,
+            window=self.window,
+        )
 
     def set_value(self, app_id: str, state_id: str, element_index: int, value: str) -> None:
         """Record semantic values, including the empty string used to clear a field."""
@@ -227,7 +237,7 @@ def _provider() -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, FakeAccessibil
     provider = object.__new__(PyAutoGuiDesktopProvider)
     provider._pyautogui = pyautogui
     provider._capture_screen = pyautogui.screenshot
-    provider._capture_app_window = lambda _process_id, region: FakeImage((region.width * 2, region.height * 2))
+    provider._capture_app_window = lambda _pid, region, _wid=None: FakeImage((region.width * 2, region.height * 2))
     provider._max_screenshot_width = 1600
     provider._jpeg_quality = 80
     provider._accessibility = accessibility
@@ -238,17 +248,17 @@ def _provider() -> tuple[PyAutoGuiDesktopProvider, FakePyAutoGui, FakeAccessibil
 def test_app_capture_uses_window_bound_pixels() -> None:
     """A semantic app capture uses pixels from its exact process/window binding."""
     provider, _, _ = _provider()
-    calls: list[tuple[int, DesktopRect]] = []
+    calls: list[tuple[int, DesktopRect, int | None]] = []
 
-    def capture_window(process_id: int, region: DesktopRect) -> FakeImage:
-        calls.append((process_id, region))
+    def capture_window(process_id: int, region: DesktopRect, window_id: int | None = None) -> FakeImage:
+        calls.append((process_id, region, window_id))
         return FakeImage((1600, 1200))
 
     provider._capture_app_window = capture_window
 
     capture = provider.screenshot(app_id="com.example.Editor", state_id="state-1")
 
-    assert calls == [(42, DesktopRect(100, 50, 800, 600))]
+    assert calls == [(42, DesktopRect(100, 50, 800, 600), 3)]
     assert (capture.screen_width, capture.screen_height) == (1512, 982)
     assert (capture.capture_x, capture.capture_y) == (100, 50)
     assert (capture.capture_width, capture.capture_height) == (800, 600)
@@ -345,22 +355,39 @@ def test_set_value_accepts_empty_string_to_clear_semantic_field() -> None:
     assert accessibility.calls == [("set_value", ("com.example.Editor", "state-1", 3, ""))]
 
 
-def test_macos_type_text_uses_layout_independent_unicode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MacOS fallback typing does not use PyAutoGUI's ASCII and keyboard-layout mapping."""
+def test_macos_type_text_routes_apps_to_background_and_primary_screen_to_hid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """App typing routes via background PID/window delivery; primary-screen keeps global HID Unicode."""
     provider, pyautogui, accessibility = _provider()
-    typed: list[str] = []
+    bg_typed: list[tuple[int, int | None, str]] = []
+    hid_typed: list[str] = []
+
+    def type_bg(pid: int, wid: int | None, text: str, *, before_chunk: Callable[[], None]) -> None:
+        before_chunk()
+        bg_typed.append((pid, wid, text))
 
     def type_unicode(text: str, *, before_chunk: Callable[[], None]) -> None:
         before_chunk()
-        typed.append(text)
+        hid_typed.append(text)
 
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
+    monkeypatch.setattr("mindroom.desktop.macos_input.type_text_background", type_bg)
     monkeypatch.setattr("mindroom.desktop.provider._type_macos_unicode", type_unicode)
 
     provider.type_text(app_id="com.example.Editor", state_id="state-1", text="café — 漢字 🙂")
-
-    assert typed == ["café — 漢字 🙂"]
+    assert bg_typed == [(42, 3, "café — 漢字 🙂")]
+    assert hid_typed == []
     assert accessibility.calls[-1] == ("keyboard_focus", "com.example.Editor")
+
+    accessibility.process_id = None
+    accessibility.window_id = None
+    provider.type_text(app_id="primary-screen", state_id="state-1", text="hid")
+    assert hid_typed == ["hid"]
     assert pyautogui.calls == []
 
 
@@ -438,21 +465,18 @@ def test_macos_window_capture_binds_process_and_exact_bounds(monkeypatch: pytest
         {"pid": 42, "layer": 0, "bounds": DesktopRect(0, 0, 50, 50), "number": 2},
         {"pid": 42, "layer": 0, "bounds": DesktopRect(100, 50, 800, 600), "number": 3},
     ]
+    seen_options: list[int] = []
     quartz = SimpleNamespace(
         CGPreflightScreenCaptureAccess=lambda: True,
-        CGWindowListCopyWindowInfo=lambda _options, _window_id: infos,
+        CGWindowListCopyWindowInfo=lambda options, _window_id: seen_options.append(options) or infos,
         CGRectMakeWithDictionaryRepresentation=lambda value, _result: (True, bounds(value)),
-        kCGWindowListOptionOnScreenOnly=1,
+        kCGWindowListOptionAll=0,
         kCGWindowListExcludeDesktopElements=2,
         kCGNullWindowID=0,
         kCGWindowOwnerPID="pid",
         kCGWindowLayer="layer",
         kCGWindowBounds="bounds",
         kCGWindowNumber="number",
-        CGRectNull="null",
-        kCGWindowListOptionIncludingWindow=8,
-        kCGWindowImageBoundsIgnoreFraming=1,
-        kCGWindowImageNominalResolution=16,
     )
     expected = FakeImage((800, 600))
     monkeypatch.setattr(
@@ -466,11 +490,22 @@ def test_macos_window_capture_binds_process_and_exact_bounds(monkeypatch: pytest
 
     assert image is expected
     assert captured_window_ids == [3]
+    assert seen_options == [2, 2]  # kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements
 
+    # Ambiguous without expected_window_id, but exact window_id disambiguates same-bounds windows (e.g. across Spaces).
     infos.append({"pid": 42, "layer": 0, "bounds": DesktopRect(100, 50, 800, 600), "number": 4})
     with pytest.raises(DesktopProviderError, match="one exact"):
         _capture_macos_window(42, DesktopRect(100, 50, 800, 600))
-    assert captured_window_ids == [3]
+    assert _capture_macos_window(42, DesktopRect(100, 50, 800, 600), window_id=4) is expected
+    assert captured_window_ids == [3, 4]
+
+    # Nonzero layer (e.g. floating panel/sheet) is ignored in bounds-only fallback but allowed with exact window_id.
+    panel_rect = DesktopRect(200, 120, 400, 300)
+    infos.append({"pid": 42, "layer": 3, "bounds": panel_rect, "number": 7})
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        _capture_macos_window(42, panel_rect)
+    assert _capture_macos_window(42, panel_rect, window_id=7) is expected
+    assert captured_window_ids == [3, 4, 7]
 
 
 @pytest.mark.parametrize(
@@ -533,40 +568,65 @@ def test_secondary_retina_capture_emits_negative_logical_origin_and_scale() -> N
     }
 
 
-def test_secondary_macos_click_uses_global_quartz_points(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Negative global app coordinates bypass primary-only PyAutoGUI input."""
+def test_secondary_macos_click_routes_background_and_primary_screen_hid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative global app coordinates use background PID routing; primary-screen keeps global HID."""
     provider, pointer, accessibility = _provider()
     accessibility.window = DesktopRect(-1800, 100, 800, 600)
     provider._display_geometry = lambda: (DisplayGeometry("2", DesktopRect(-1920, 0, 1920, 1080), 3840, 2160),)
-    emitted = []
+    bg_emitted: list[object] = []
+    hid_emitted: list[object] = []
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
     monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
+    monkeypatch.setattr(
+        "mindroom.desktop.macos_input.click_background",
+        lambda pid, x, y, **kwargs: bg_emitted.append((pid, x, y, kwargs["count"], kwargs["window_id"])),
+    )
+    monkeypatch.setattr(
         "mindroom.desktop.macos_input.click",
-        lambda x, y, **kwargs: emitted.append((x, y, kwargs["count"])),
+        lambda x, y, **kwargs: hid_emitted.append((x, y, kwargs["count"])),
     )
     provider.click(app_id="com.example.Editor", state_id="state-1", x=0, y=0, button="left")
-    assert emitted == [(-1800, 100, 1)]
+    assert bg_emitted == [(42, -1800, 100, 1, 3)]
+    assert hid_emitted == []
+
+    accessibility.process_id = None
+    accessibility.window_id = None
+    provider.click(app_id="primary-screen", state_id="state-1", x=0, y=0, button="left")
+    assert hid_emitted == [(-1800, 100, 1)]
     assert pointer.calls == []
 
 
-@pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "scroll_element", "drag"])
-def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
+def _install_occluded_background_quartz(
     monkeypatch: pytest.MonkeyPatch,
-    action: str,
-) -> None:
-    """A foreign top window over the target, or one a drag moves into, stops input before an event reaches it.
-
-    Input covered before its first event sends nothing, so only a drag that moves under the window partway is unknown.
-    """
-    provider, _, accessibility = _provider()
+    window: DesktopRect,
+) -> SimpleNamespace:
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
     monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.activate_without_raise", lambda _pid, _wid: True)
+    monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.set_integer_field", lambda *_args: False)
+    monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.set_window_location", lambda *_args: True)
+    monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.post_to_pid", lambda *_args, **_kw: False)
 
-    def window(pid: int, layer: int, x: int, width: int, alpha: float = 1.0) -> dict[str, object]:
-        bounds = {"X": x, "Y": 0, "Width": width, "Height": 1000}
-        return {"layer": layer, "alpha": alpha, "pid": pid, "bounds": bounds}
+    def bounds(rect: DesktopRect) -> SimpleNamespace:
+        return SimpleNamespace(
+            origin=SimpleNamespace(x=rect.x, y=rect.y),
+            size=SimpleNamespace(width=rect.width, height=rect.height),
+        )
 
-    posted: list[dict[str, object]] = []
+    # Foreign app (pid 7) completely covers the allowed app (pid 42, wid 3).
+    windows = [
+        {"pid": 7, "layer": 0, "number": 9, "bounds": DesktopRect(0, 0, 1500, 900)},
+        {"pid": 42, "layer": 0, "number": 3, "bounds": window},
+    ]
+    state = SimpleNamespace(hid_posted=[], pid_posted=[], checks=0, drop_after=None)
+
+    def copy_windows(_options: int, _relative: int) -> list[dict[str, object]]:
+        state.checks += 1
+        return [windows[0]] if state.drop_after is not None and state.checks >= state.drop_after else windows
+
     quartz = SimpleNamespace(
         kCGEventLeftMouseDown=1,
         kCGEventLeftMouseUp=2,
@@ -579,56 +639,151 @@ def test_macos_pointer_input_never_reaches_a_window_covering_the_allowed_app(
         kCGMouseButtonLeft=0,
         kCGMouseButtonRight=1,
         kCGMouseButtonCenter=2,
-        kCGMouseEventClickState=10,
-        kCGHIDEventTap=0,
         kCGScrollEventUnitLine=1,
-        kCGWindowListOptionOnScreenOnly=1,
+        kCGWindowListOptionAll=0,
+        kCGWindowListExcludeDesktopElements=2,
         kCGNullWindowID=0,
         kCGWindowLayer="layer",
-        kCGWindowAlpha="alpha",
         kCGWindowOwnerPID="pid",
         kCGWindowBounds="bounds",
+        kCGWindowNumber="number",
+        CGRectMakeWithDictionaryRepresentation=lambda value, _res: (True, bounds(value)),
         CGEventCreateMouseEvent=lambda _source, kind, point, _button: {"kind": kind, "point": point},
         CGEventSetIntegerValueField=lambda _event, _field, _value: None,
+        CGEventSetFlags=lambda _event, _flags: None,
+        CGEventSetLocation=lambda event, point: event.update(point=point),
         CGEventCreateScrollWheelEvent=lambda *_args: {"kind": "wheel"},
-        CGEventPost=lambda _tap, event: posted.append(event),
-        # Front to back: a transparent overlay, a floating panel over x >= 500, the allowed app, the desktop.
-        CGWindowListCopyWindowInfo=lambda _options, _relative: [
-            window(9, 25, 0, 2000, alpha=0.0),
-            window(7, 3, 500, 1000),
-            window(42, 0, 100, 800),
-            window(1, -2147483623, 0, 2000),
-        ],
+        CGEventPost=lambda _tap, event: state.hid_posted.append(event),
+        CGEventPostToPid=lambda pid, event: state.pid_posted.append((pid, dict(event))),
+        CGWindowListCopyWindowInfo=copy_windows,
+        state=state,
     )
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    return quartz
 
-    def act(x: int) -> None:
+
+@pytest.mark.parametrize("action", ["click", "double_click", "hover", "scroll", "scroll_element", "drag"])
+def test_macos_background_pointer_input_succeeds_when_occluded_and_stops_when_window_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """Occluded app windows still receive PID-routed background events, but a missing/moved window stops safely."""
+    provider, _, accessibility = _provider()
+    quartz = _install_occluded_background_quartz(monkeypatch, accessibility.window)
+    state = quartz.state
+
+    def act() -> None:
         target = {"app_id": "com.example.Editor", "state_id": "state-1"}
         if action == "drag":
-            provider.drag(**target, start_x=0, start_y=0, end_x=x, end_y=0)
+            provider.drag(**target, start_x=0, start_y=0, end_x=1000, end_y=0)
         elif action == "scroll":
-            provider.scroll(**target, direction="down", pages=1, x=x, y=0)
+            provider.scroll(**target, direction="down", pages=1, x=1000, y=0)
         elif action == "scroll_element":
-            # The element is centered where the coordinate actions point.
-            accessibility.element_bounds = DesktopRect(*_normalized_point(accessibility.window, x=x, y=0), 1, 1)
+            accessibility.element_bounds = DesktopRect(*_normalized_point(accessibility.window, x=1000, y=0), 1, 1)
             provider.scroll_element(**target, element_index=0, direction="down", pages=1)
         elif action == "click":
-            provider.click(**target, x=x, y=0, button="left")
+            provider.click(**target, x=1000, y=0, button="left")
         else:
-            getattr(provider, action)(**target, x=x, y=0)
+            getattr(provider, action)(**target, x=1000, y=0)
 
-    act(300)
-    assert posted
-    posted.clear()
-    with pytest.raises(AccessibilityError, match="covers the allowed app") as caught:
-        act(1000)
-    assert type(caught.value) is (AccessibilityActionOutcomeUnknownError if action == "drag" else AccessibilityError)
-    assert all(event["kind"] != "wheel" and event["point"][0] < 500 for event in posted)
+    # Succeeds completely despite foreign window covering the target; never touches global HID.
+    act()
+    assert state.hid_posted == []
+    assert state.pid_posted
+    assert all(pid == 42 for pid, _ in state.pid_posted)
+
+    # Unresolvable window before posting refuses with DesktopProviderError and posts nothing.
+    state.pid_posted.clear()
+    state.checks, state.drop_after = 0, 1
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        act()
+    assert state.pid_posted == []
+
+    # Disappearing window right before first event sends nothing and raises definite AccessibilityError.
+    state.pid_posted.clear()
+    state.checks, state.drop_after = 0, 2
+    with pytest.raises(AccessibilityError, match="nothing was sent") as caught:
+        act()
+    assert type(caught.value) is AccessibilityError
+    assert state.pid_posted == []
+
+    # Disappearing mid-drag raises AccessibilityActionOutcomeUnknownError and releases LeftMouseUp.
     if action == "drag":
-        assert [event["kind"] for event in posted[:2]] == [8, 1]
-        assert posted[-1]["kind"] == 2
-    else:
-        assert posted == []
+        state.pid_posted.clear()
+        state.checks, state.drop_after = 0, 5
+        with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome may be partial"):
+            act()
+        assert state.pid_posted[-1][1]["kind"] == quartz.kCGEventLeftMouseUp
+
+
+def test_macos_keypress_routes_app_to_background_and_primary_screen_to_pyautogui(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """App keypress uses background PID delivery on macOS; primary-screen keeps PyAutoGUI global HID."""
+    provider, pyautogui, accessibility = _provider()
+    bg_keys: list[tuple[int, int | None, tuple[str, ...]]] = []
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
+    monkeypatch.setattr(
+        "mindroom.desktop.macos_input.keypress_background",
+        lambda pid, wid, keys: bg_keys.append((pid, wid, tuple(keys))),
+    )
+
+    provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["command", "a"])
+    assert bg_keys == [(42, 3, ("command", "a"))]
+    assert pyautogui.calls == []
+
+    accessibility.process_id = None
+    accessibility.window_id = None
+    provider.keypress(app_id="primary-screen", state_id="state-1", keys=["enter"])
+    assert pyautogui.calls == [("press", "enter")]
+
+
+def test_macos_background_input_resolves_missing_window_id_and_refuses_unresolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When AX supplies window_id=None, provider resolves CGWindowID once, stamps it, and refuses if missing."""
+    provider, _, accessibility = _provider()
+    accessibility.window_id = None
+    quartz = _install_occluded_background_quartz(monkeypatch, accessibility.window)
+    state = quartz.state
+    activations: list[tuple[int, int]] = []
+    stamped: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "mindroom.desktop.macos_input.macos_skylight.activate_without_raise",
+        lambda pid, wid: activations.append((pid, wid)) or True,
+    )
+    monkeypatch.setattr(
+        "mindroom.desktop.macos_input.macos_skylight.set_integer_field",
+        lambda _event, field, value: stamped.append((field, value)) or True,
+    )
+    quartz.CGEventCreateKeyboardEvent = lambda _source, keycode, down: {"keycode": keycode, "down": down}
+    quartz.CGEventKeyboardSetUnicodeString = lambda event, _length, text: event.update(text=text)
+
+    provider.click(app_id="com.example.Editor", state_id="state-1", x=500, y=500, button="left")
+    assert activations == [(42, 3)]
+    assert {(51, 3), (91, 3), (92, 3)} <= set(stamped)
+
+    activations.clear()
+    provider.type_text(app_id="com.example.Editor", state_id="state-1", text="hi")
+    provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["command", "a"])
+    assert activations == [(42, 3), (42, 3)]
+
+    # Unresolvable window refuses pointer and keyboard actions with DesktopProviderError before posting.
+    state.pid_posted.clear()
+    activations.clear()
+    state.checks, state.drop_after = 0, 1
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        provider.click(app_id="com.example.Editor", state_id="state-1", x=500, y=500, button="left")
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="hi")
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["enter"])
+    assert state.pid_posted == []
+    assert activations == []
 
 
 def test_drag_releases_when_motion_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -690,23 +845,30 @@ def test_unicode_stops_before_next_chunk_if_focus_changes(monkeypatch: pytest.Mo
 def test_untargeted_macos_typing_stops_once_the_allowed_app_loses_keyboard_focus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Text without an element target never continues into whichever app took focus mid-typing."""
+    """Text without an element target stops before the next chunk if the target guard fails mid-typing."""
     provider, pyautogui, accessibility = _provider()
-    posted = []
+    posted: list[dict[str, object]] = []
     quartz = SimpleNamespace(
         CGEventCreateKeyboardEvent=lambda _source, _code, down: {"down": down},
+        CGEventSetFlags=lambda _event, _flags: None,
         CGEventKeyboardSetUnicodeString=lambda event, _length, text: event.update(text=text),
-        CGEventPost=lambda _tap, event: posted.append(event),
-        kCGHIDEventTap=0,
+        CGEventPostToPid=lambda _pid, event: posted.append(event),
     )
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
+    monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
+    monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.activate_without_raise", lambda *_args: True)
+    monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.post_to_pid", lambda *_args, **_kw: False)
     accessibility.keyboard_focus_checks_left = 1
 
     with pytest.raises(AccessibilityActionOutcomeUnknownError, match="lost keyboard focus"):
         provider.type_text(app_id="com.example.Editor", state_id="state-1", text="a" * 41)
 
-    assert [event["text"] for event in posted] == ["a" * 20, "a" * 20]
+    assert [event["text"] for event in posted] == ["a" * 16, "a" * 16]
     assert accessibility.calls[0] == ("prepare_keyboard", ("com.example.Editor", "state-1"))
     assert pyautogui.calls == []
 
@@ -761,7 +923,7 @@ def test_capture_rejects_display_replacement_during_capture() -> None:
     display = DisplayGeometry("before", DesktopRect(0, 0, 1512, 982), 1512, 982)
     provider._display_geometry = lambda: (display,)
 
-    def capture(_process_id: int, region: DesktopRect) -> FakeImage:
+    def capture(_process_id: int, region: DesktopRect, _window_id: int | None = None) -> FakeImage:
         nonlocal display
         display = DisplayGeometry("after", DesktopRect(0, 0, 1512, 982), 1512, 982)
         return FakeImage((region.width, region.height))
@@ -806,7 +968,7 @@ def test_window_replacement_during_screenshot_discards_pixels(monkeypatch: pytes
     """A window replaced while the asynchronous capture runs cannot keep its old binding."""
     monkeypatch.setitem(sys.modules, "Quartz", SimpleNamespace(CGPreflightScreenCaptureAccess=lambda: True))
     ids = iter((3, 4))
-    monkeypatch.setattr("mindroom.desktop.provider._macos_window_id", lambda _pid, _region: next(ids))
+    monkeypatch.setattr("mindroom.desktop.provider._macos_window_id", lambda _pid, _region, **_kw: next(ids))
     monkeypatch.setattr("mindroom.desktop.provider.macos_capture.capture_window", lambda *_args: "image")
     monkeypatch.setattr(
         "mindroom.desktop.provider._pillow_image_from_macos_capture",
@@ -871,27 +1033,35 @@ def test_provider_accepts_jpeg_quality_20_to_95(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_macos_drag_does_not_call_duplicate_prepare_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drag on macOS validates once up front and once in before_press, without an extra duplicate call."""
+    """Drag on macOS validates once up front and once in before_press via background delivery."""
     provider, _, accessibility = _provider()
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
     drag_calls: list[object] = []
 
-    def fake_drag(
+    def fake_drag_bg(
+        pid: int,
         start: tuple[int, int],
         end: tuple[int, int],
         *,
         duration: float,
+        window_id: int | None,
+        window_rect: DesktopRect | None,
         check: object,
         before_press: object,
     ) -> None:
-        del duration, check
+        del duration, window_rect, check
         assert callable(before_press)
         before_press()
-        drag_calls.append((start, end))
+        drag_calls.append((pid, window_id, start, end))
 
-    monkeypatch.setattr("mindroom.desktop.provider.macos_input.drag", fake_drag)
+    monkeypatch.setattr("mindroom.desktop.provider.macos_input.drag_background", fake_drag_bg)
     provider.drag(app_id="com.example.Editor", state_id="state-1", start_x=0, start_y=0, end_x=500, end_y=500)
     assert len(drag_calls) == 1
+    assert drag_calls[0][:2] == (42, 3)
     assert [call for call in accessibility.calls if call[0] == "prepare_fallback"] == [
         ("prepare_fallback", ("com.example.Editor", "state-1")),
         ("prepare_fallback", ("com.example.Editor", "state-1")),

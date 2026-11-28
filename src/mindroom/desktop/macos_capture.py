@@ -8,6 +8,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from mindroom.desktop import macos_skylight
 from mindroom.desktop.accessibility import DesktopRect
 
 # Objective-C framework and callback types are synthesized by PyObjC at runtime.
@@ -56,12 +57,12 @@ def _await_result(start: Callable[[Callable[..., None]], None], deadline: float)
     return value
 
 
-def _content(framework: Any, deadline: float) -> Any:
+def _content(framework: Any, deadline: float, *, on_screen_only: bool = True) -> Any:
     return _await_result(
         lambda complete: (
             framework.SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
                 True,
-                True,
+                on_screen_only,
                 complete,
             )
         ),
@@ -117,24 +118,58 @@ def _image(framework: Any, content_filter: Any, deadline: float, *, window: bool
     return image
 
 
+def _hw_capture_window(window_id: int, region: DesktopRect) -> object:
+    """Capture an off-Space window via SkyLight hardware capture with strict geometry validation."""
+    import Quartz  # noqa: PLC0415
+
+    image = macos_skylight.hw_capture_window(window_id)
+    if image is None:
+        msg = "Off-space window capture is unavailable; move the window onto the active Space and request fresh app state."
+        raise MacOSCaptureError(msg)
+    width = int(Quartz.CGImageGetWidth(image))  # ty: ignore[missing-attribute]
+    height = int(Quartz.CGImageGetHeight(image))  # ty: ignore[missing-attribute]
+    if (
+        not 0 < width <= 32768
+        or not 0 < height <= 32768
+        or width * height > 100_000_000
+        or region.width <= 0
+        or region.height <= 0
+    ):
+        msg = "Off-space window capture returned unexpected pixel dimensions; request fresh app state."
+        raise MacOSCaptureError(msg)
+    scale_x = width / region.width
+    scale_y = height / region.height
+    if (
+        not math.isfinite(scale_x)
+        or not math.isfinite(scale_y)
+        or not 0 < scale_x <= 4
+        or not 0 < scale_y <= 4
+        or not math.isclose(scale_x, scale_y, rel_tol=0.02)
+    ):
+        msg = "Off-space window capture returned unexpected pixel dimensions; request fresh app state."
+        raise MacOSCaptureError(msg)
+    return image
+
+
 def capture_window(window_id: int, process_id: int, region: DesktopRect) -> object:
-    """Capture only the SCWindow matching the already validated CG window."""
+    """Capture only the SCWindow matching the already validated CG window, including occluded or off-Space windows."""
     framework, objc = _frameworks()
     deadline = time.monotonic() + _CAPTURE_TIMEOUT_SECONDS
     with objc.autorelease_pool():
-        content = _content(framework, deadline)
+        content = _content(framework, deadline, on_screen_only=False)
         matching = [
             window
             for window in content.windows()
             if int(window.windowID()) == window_id
             and window.owningApplication() is not None
             and int(window.owningApplication().processID()) == process_id
-            and window.isOnScreen()
             and _rect(window.frame()) == region
         ]
         if len(matching) != 1:
-            msg = "ScreenCaptureKit could not bind one exact on-screen application window; request fresh app state."
+            msg = "ScreenCaptureKit could not bind one exact application window; request fresh app state."
             raise MacOSCaptureError(msg)
+        if not matching[0].isOnScreen():
+            return _hw_capture_window(window_id, region)
         content_filter = framework.SCContentFilter.alloc().initWithDesktopIndependentWindow_(matching[0])
         if _rect(content_filter.contentRect()).width != region.width or (
             _rect(content_filter.contentRect()).height != region.height
