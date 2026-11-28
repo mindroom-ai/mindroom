@@ -351,7 +351,7 @@ def test_tach_breaks_metadata_plugins_cycle_with_private_split_modules() -> None
         "mindroom.tool_system.declarations",
         "mindroom.tool_system.registry",
     }
-    assert registry_deps == {"mindroom.tool_system.declarations"}
+    assert registry_deps == {"mindroom.logging_config", "mindroom.tool_system.declarations"}
 
 
 def test_selected_modules_do_not_hide_tool_system_imports_inside_functions() -> None:

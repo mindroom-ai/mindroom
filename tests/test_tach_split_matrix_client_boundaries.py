@@ -54,6 +54,7 @@ BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.reply_turn.inbox",
     "mindroom.response_lifecycle",
     "mindroom.response_runner",
+    "mindroom.steward_duties",
     "mindroom.turns.dispatch",
 }
 

@@ -9,6 +9,7 @@ on:
       - ".github/workflows/tach.yml"
       - "pyproject.toml"
       - "tach.toml"
+      - "tests/test_tach_visibility.py"
       - "uv.lock"
       - "src/**"
 
@@ -38,5 +39,8 @@ jobs:
       - name: Install dev dependencies
         run: uv sync --group dev
 
-      - name: Run narrow Tach checks
-        run: uv run tach check --dependencies --interfaces
+      - name: Check full Tach boundaries and acyclicity
+        run: uv run tach check --dependencies --interfaces --exact
+
+      - name: Ratchet Tach module coverage and configuration
+        run: uv run pytest --noconftest -o addopts="" tests/test_tach_visibility.py

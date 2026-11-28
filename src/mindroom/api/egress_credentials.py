@@ -18,6 +18,7 @@ from pydantic import BaseModel, ValidationError
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import require_connections_user
+from mindroom.api.config_lifecycle import snapshot_oauth_providers
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     EmptyMutation,
@@ -76,7 +77,6 @@ from mindroom.egress_broker.user_services import (
     user_service_hosts_error,
 )
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking, resolve_oauth_credential_context
-from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.plugins import config_plugins
 

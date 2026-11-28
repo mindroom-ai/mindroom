@@ -12,6 +12,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle, oauth
+from mindroom.api.config_lifecycle import snapshot_oauth_providers
 from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     resolve_requester_credentials_target,
@@ -46,7 +47,6 @@ from mindroom.egress_broker.oauth_source import broker_credential_context
 from mindroom.egress_broker.secrets import PERSONAL_WORKER_SCOPES, delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
 from mindroom.egress_broker.user_services import ServiceSource, service_source
-from mindroom.oauth.registry import snapshot_oauth_providers
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
