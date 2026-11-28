@@ -16,6 +16,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.constants import trusted_tool_runtime_env_values
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.egress_broker.agent_scope import broker_serves_primary_shell
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
@@ -24,7 +25,6 @@ from mindroom.egress_broker.env import (
     apply_runner_ca_bundle,
     broker_execution_env,
     broker_git_config,
-    broker_serves_primary_shell,
     egress_broker_enabled,
     personal_page_served,
     primary_callback_hosts,

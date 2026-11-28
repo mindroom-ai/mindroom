@@ -20,8 +20,8 @@ from mindroom.ai_run_metadata import model_payload
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.plugin_http import RoomReader, require_room_reader
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.metadata import offered_functions
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.settings import offered_functions
 from mindroom.turn_model import resolve_inherited_model
 
 router = APIRouter(prefix="/api/rooms/{room_id}", tags=["agent-profiles"])

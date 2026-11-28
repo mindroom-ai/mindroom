@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import agent_policy, agent_tool_facts, expanded_tool_names
-from mindroom.tool_system.metadata import (
+from mindroom.constants import MAX_DELEGATION_DEPTH
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import (
     offered_functions,
     resolve_tool_settings,
     validate_authored_tool_entry_overrides,
 )
-from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -20,8 +21,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.resolution import AgentToolFacts
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.placement import ToolPlacement
     from mindroom.tool_system.registry import ToolRegistry
-    from mindroom.tool_system.sandbox_proxy import ToolPlacement
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 # The functions of a toolkit that needs a room which work without one, all a turn without a room offers of it.
@@ -184,8 +185,6 @@ class AgentTools:
             )
             names.append(tool_name)
         # Imported here to avoid the delegation -> personas -> agent tools import cycle.
-        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
-
         return tuple(
             entry
             for entry in entries

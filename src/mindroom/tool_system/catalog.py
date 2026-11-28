@@ -13,19 +13,19 @@ from mindroom.tool_system.declarations import (
     ToolStatus,
     ToolValidationInfo,
 )
-from mindroom.tool_system.metadata import (
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
+from mindroom.tool_system.settings import (
     ToolConfigOverrideError,
     ToolInitOverrideError,
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
-    get_tool_by_name,
     load_toolkit_class,
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
     serialize_tool_validation_snapshot,
     validate_authored_tool_entry_overrides,
 )
-from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 
 __all__ = [
     "ConfigField",

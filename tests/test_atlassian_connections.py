@@ -20,13 +20,10 @@ from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
 )
-from mindroom.tool_system.metadata import (
-    ToolConfigOverrideError,
-    get_tool_by_name,
-    validate_authored_tool_entry_overrides,
-)
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import ToolConfigOverrideError, validate_authored_tool_entry_overrides
 from mindroom.tool_system.toolkits import toolkit_function_names
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.atlassian_test_support import (

@@ -29,8 +29,8 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.tool_system.catalog import export_tools_metadata
+from mindroom.tool_system.placement import primary_owns_tool_settings
 from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
-from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
     build_requester_execution_identity,

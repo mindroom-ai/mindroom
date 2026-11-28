@@ -9,8 +9,8 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.terminal.client import WorkerTerminals
 from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkits import toolkit_function, toolkit_worker_stand_ins
 
 if TYPE_CHECKING:

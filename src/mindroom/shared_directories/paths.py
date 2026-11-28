@@ -17,7 +17,7 @@ from mindroom.shared_directories.store import (
     shared_directory_relative_path,
 )
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, tool_placement
+from mindroom.tool_system.placement import sandbox_proxy_config, tool_placement
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
 from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.runtime import worker_visible_storage_root

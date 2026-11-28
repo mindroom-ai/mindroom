@@ -34,6 +34,7 @@ DEFAULT_MATRIX_HOMESERVER = "https://mindroom.chat"
 # (~10) so a room has to flood much harder before the server truncates its
 # timeline and forces a limited-sync gap backfill.
 CLASSIC_SYNC_TIMELINE_LIMIT = 5000
+MAX_DELEGATION_DEPTH = 3
 DEFAULT_COMPACTION_TIMEOUT_SECONDS = 600.0
 # Idle time after which a thread's provider prompt cache counts as cold; most provider prompt caches expire
 # within an hour idle.

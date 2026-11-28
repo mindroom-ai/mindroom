@@ -11,15 +11,13 @@ import inspect
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from mindroom.llm.media import File, named_by_resource
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import authoring
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue, read_tool_value
 from mindroom.tool_system.tool_schema import (
     nullable_optional_parameters,
     tool_description,
@@ -142,6 +140,18 @@ def toolkit_function_names(toolkit: Toolkit) -> tuple[str, ...]:
     """Return the names of the functions ``toolkit`` offers, in its ``functions`` order."""
     offered = None if toolkit.function_finishing is None else toolkit.function_finishing.offered
     return tuple(name for name in toolkit.functions if offered is None or name in offered)
+
+
+def toolkit_functions(toolkit: Toolkit) -> dict[str, Callable[..., Any]]:
+    """Return the callables of ``toolkit``'s functions by name, one per name, as an agent's run calls them.
+
+    Each validates its arguments; for a toolkit ``get_tool_by_name`` built, each also handles ``mindroom_output_path``
+    and sends a call routed to a worker there.
+    A call through one inside an async tool shares that call's ownership of the synchronous work it starts, so the
+    tool may call them any number of times, at once too; a tool that calls them must be async.
+    """
+    adapted = adapt_toolkit(toolkit)
+    return {function.name: function.entrypoint for function in adapted.functions}
 
 
 def toolkit_function(
@@ -267,22 +277,6 @@ class StreamCollector:
         )
 
 
-def _normalize_file(file: File) -> File:
-    """When inline bytes sit beside a path, keep the path's name and type and drop the path so readers never open it."""
-    if file.content is not None and file.filepath is not None:
-        return replace(named_by_resource(file, Path(file.filepath).name), filepath=None)
-    return file
-
-
-def read_tool_value(result: object) -> ToolValue | None:
-    """Read a tool's return value as a ``ToolValue``; None for a value that is not a tool value."""
-    if not isinstance(result, ToolValue):
-        return None
-    if any(file.content is not None and file.filepath is not None for file in result.files):
-        return replace(result, files=tuple(_normalize_file(file) for file in result.files))
-    return result
-
-
 __all__ = [
     "FunctionScopedInstructions",
     "StreamCollector",
@@ -291,11 +285,11 @@ __all__ = [
     "adapt_toolkit",
     "configure_toolkit_functions",
     "model_arguments",
-    "read_tool_value",
     "rename_toolkit_functions",
     "requires_connect",
     "toolkit_function",
     "toolkit_function_names",
+    "toolkit_functions",
     "toolkit_worker_stand_ins",
     "with_offered_instructions",
 ]

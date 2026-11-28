@@ -32,8 +32,8 @@ from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRo
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.credentials.policy import RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY
 from mindroom.egress_broker import oauth_source, secrets
+from mindroom.egress_broker.agent_scope import egress_agent_scope
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
-from mindroom.egress_broker.env import egress_agent_scope
 from mindroom.egress_broker.oauth_source import resolve_oauth_token
 from mindroom.egress_broker.rules import EgressRules, route_request
 from mindroom.egress_broker.tokens import WorkerClaims

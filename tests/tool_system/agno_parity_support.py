@@ -37,8 +37,8 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.vendor_telemetry import vendor_telemetry_env_values

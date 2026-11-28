@@ -23,13 +23,13 @@ from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_turn import detached_turn_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.output_files import tool_workdir
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
     detached_requester_context,
     detached_tool_scope,
 )
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 

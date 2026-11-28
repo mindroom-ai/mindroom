@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from mindroom.api import sandbox_exec
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import resolve_path_within_root
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
+from mindroom.tool_system.placement import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     requires_explicit_private_agent_visibility,
     visible_workspace_roots,

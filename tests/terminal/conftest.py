@@ -14,8 +14,8 @@ from mindroom.api import sandbox_runner
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.workers.runtime import reset_primary_worker_manager

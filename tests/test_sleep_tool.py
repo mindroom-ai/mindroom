@@ -11,7 +11,8 @@ import pytest
 
 from mindroom.custom_tools import sleep as sleep_module
 from mindroom.custom_tools.sleep import SleepTools
-from mindroom.tool_system.authoring import Toolkit, toolkit_functions
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.toolkits import toolkit_functions
 from mindroom.tools.sleep import sleep_tools
 
 

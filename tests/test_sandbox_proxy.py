@@ -34,6 +34,7 @@ from PIL import Image as PILImage
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.tool_system.placement as placement_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tool_system.worker_proxy_client as worker_proxy_client_module
 import mindroom.tools  # noqa: F401
@@ -61,23 +62,20 @@ from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope, shell_background_scope
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.authoring import Toolkit, tool, toolkit_functions
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.declarations import (
+    ConfigField,
     SupportsPrimaryCallPlacement,
     ToolCategory,
     ToolExecutionTarget,
     ToolFileAccess,
+    ToolMetadata,
+    ToolValidationInfo,
 )
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.media_transport import encode_media_result
-from mindroom.tool_system.metadata import (
-    ConfigField,
-    ToolInitOverrideError,
-    ToolMetadata,
-    ToolValidationInfo,
-    get_tool_by_name,
-)
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -88,6 +86,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
     worker_progress_pump_scope,
 )
+from mindroom.tool_system.settings import ToolInitOverrideError
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import (
@@ -100,6 +99,7 @@ from mindroom.tool_system.toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
     toolkit_function,
+    toolkit_functions,
 )
 from mindroom.tool_system.worker_proxy_client import (
     WorkerProxyClientConfig,
@@ -382,7 +382,7 @@ def _runtime_paths_from_env() -> RuntimePaths:
 
 def _runs_in_worker(runtime_paths: RuntimePaths, tool_name: str, worker_tools: Collection[str] | None) -> bool:
     """Return whether ``tool_name`` runs in a worker for an agent whose worker tools are ``worker_tools``."""
-    return sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
+    return placement_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
         tool_name,
         worker_tools,
     )
@@ -2332,7 +2332,7 @@ def test_only_the_static_runner_leases_tool_own_saved_settings(
     runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox-runner:8765")
 
     config = sandbox_proxy_module.worker_proxy_client_config(
-        sandbox_proxy_module.sandbox_proxy_config(runtime_paths),
+        placement_module.sandbox_proxy_config(runtime_paths),
         runtime_paths,
     )
 
@@ -2405,7 +2405,7 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
             ),
         ),
         primary_built_service=functools.partial(
-            sandbox_proxy_module.primary_owns_tool_settings,
+            placement_module.primary_owns_tool_settings,
             tools=builtin_tool_registry(),
             runtime_paths=runtime_paths,
         ),
@@ -2458,7 +2458,7 @@ def test_scoped_calls_do_not_lease_settings_the_primary_does_not_own(tmp_path: P
         worker_manager=_TrackingWorkerManager(),
         client_factory=_recording_client_class(captured_calls=captured_calls),
         primary_built_service=functools.partial(
-            sandbox_proxy_module.primary_owns_tool_settings,
+            placement_module.primary_owns_tool_settings,
             tools=builtin_tool_registry(),
             runtime_paths=runtime_paths,
         ),
@@ -2942,14 +2942,14 @@ def test_primary_owns_settings_of_every_registered_tool(
     runtime_paths = _configure_proxy_runtime(monkeypatch, proxy_url="http://sandbox:8765", runner_mode=runner_mode)
 
     assert (
-        sandbox_proxy_module.primary_owns_tool_settings(
+        placement_module.primary_owns_tool_settings(
             "ownership_test",
             builtin_tool_registry(),
             runtime_paths=runtime_paths,
         )
         is expected
     )
-    assert not sandbox_proxy_module.primary_owns_tool_settings(
+    assert not placement_module.primary_owns_tool_settings(
         "unregistered_test",
         builtin_tool_registry(),
         runtime_paths=runtime_paths,
@@ -3014,7 +3014,7 @@ def _attachments_use_worker(runtime_paths: RuntimePaths, *, tools: list[str], wo
     agent_tools = resolve_agent_tools(config, "code", builtin_tool_registry())
     return agent_tools.workspace_in_worker(
         agent_tools.tool_names,
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()),
+        placement_module.tool_placement(runtime_paths, builtin_tool_registry()),
     )
 
 
@@ -5166,7 +5166,7 @@ def test_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.Mo
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode=None,
     )
-    proxy_config = sandbox_proxy_module.sandbox_proxy_config(runtime_paths)
+    proxy_config = placement_module.sandbox_proxy_config(runtime_paths)
     monkeypatch.delenv("MINDROOM_WORKER_BACKEND", raising=False)
 
     first_init_started = threading.Event()
@@ -7462,7 +7462,7 @@ class TestWorkerToolsOverride:
             execution_mode=None,
         )
 
-        assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
+        assert placement_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
         assert _runs_in_worker(runtime_paths, "shell", None) is True
         assert _runs_in_worker(runtime_paths, "calculator", None) is True
 
@@ -7480,7 +7480,7 @@ class TestWorkerToolsOverride:
         monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOOLS", "*")
         runtime_paths = _runtime_paths_from_env()
 
-        assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
+        assert placement_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
         assert _runs_in_worker(runtime_paths, "shell", None) is True
         assert _runs_in_worker(runtime_paths, "calculator", None) is True
 

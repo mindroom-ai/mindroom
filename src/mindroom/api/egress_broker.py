@@ -39,7 +39,8 @@ from mindroom.api.egress_status import (
     require_egress_broker_enabled,
     rule_summaries,
 )
-from mindroom.egress_broker.env import egress_agent_scope, personal_page_served
+from mindroom.egress_broker.agent_scope import egress_agent_scope
+from mindroom.egress_broker.env import personal_page_served
 from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
 from mindroom.egress_broker.oauth_source import broker_credential_context
 from mindroom.egress_broker.secrets import PERSONAL_WORKER_SCOPES, delete_secret, save_secret

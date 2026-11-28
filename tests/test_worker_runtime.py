@@ -107,7 +107,7 @@ def test_dedicated_worker_validation_snapshot_tolerates_a_plugin_that_does_not_l
 def _configure_once(monkeypatch: pytest.MonkeyPatch, build: MagicMock) -> MagicMock:
     """Serve the proxy settings and one reading of the backend's settings that builds through ``build``."""
     monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        "mindroom.workers.runtime.sandbox_proxy_config",
         lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
     )
     configure = MagicMock(
@@ -355,7 +355,7 @@ def test_configured_kubernetes_worker_manager_lease_needs_no_config(
     """Kubernetes maintenance and status lease the manager before any config is applied."""
     runtime_paths = _kubernetes_runtime_paths(tmp_path)
     monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        "mindroom.workers.runtime.sandbox_proxy_config",
         lambda _paths: MagicMock(proxy_url=None, proxy_token="worker-token"),  # noqa: S106
     )
     build_manager = MagicMock(return_value=MagicMock(backend_name="kubernetes"))
@@ -378,7 +378,7 @@ def test_primary_worker_manager_identity_ignores_the_applied_config(
     runtime_paths = _kubernetes_runtime_paths(tmp_path)
     _count_validation_snapshots(monkeypatch)
     monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
+        "mindroom.workers.runtime.sandbox_proxy_config",
         lambda _paths: MagicMock(proxy_url=None, proxy_token="worker-token"),  # noqa: S106
     )
     build_manager = MagicMock(side_effect=lambda *_args, **_kwargs: MagicMock(backend_name="kubernetes"))

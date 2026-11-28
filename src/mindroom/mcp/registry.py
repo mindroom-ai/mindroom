@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.mcp.config import mcp_oauth_bridge_function_names, validate_mcp_tool_filter_overlap
+from mindroom.mcp.config import mcp_oauth_bridge_function_names
 from mindroom.mcp.errors import MCPError
 from mindroom.mcp.oauth import mcp_oauth_provider_id
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
-from mindroom.tool_system.catalog import (
+from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
     ToolAuthoredOverrideValidator,
@@ -75,24 +75,6 @@ def _tool_override_fields() -> list[ConfigField]:
             description="Optional per-assignment timeout override for MCP tool calls.",
         ),
     ]
-
-
-def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -> None:
-    """Validate normalized per-agent overrides for one MCP registry tool."""
-    if not overrides:
-        return
-
-    include_tools = cast("list[str]", overrides.get("include_tools", []))
-    exclude_tools = cast("list[str]", overrides.get("exclude_tools", []))
-    message = f"Invalid per-agent override for '{tool_name}': include_tools and exclude_tools overlap"
-    validate_mcp_tool_filter_overlap(include_tools, exclude_tools, message=message)
-
-    timeout_seconds = overrides.get("call_timeout_seconds")
-    if timeout_seconds is not None and (
-        not isinstance(timeout_seconds, int | float) or isinstance(timeout_seconds, bool) or float(timeout_seconds) <= 0
-    ):
-        msg = f"Invalid per-agent override for '{tool_name}.call_timeout_seconds': expected a number greater than 0"
-        raise ValueError(msg)
 
 
 def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:

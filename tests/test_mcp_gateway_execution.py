@@ -21,9 +21,9 @@ from mindroom.mcp_gateway import server
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.tool_system import sandbox_proxy, toolkit_builder
-from mindroom.tool_system.authoring import Toolkit, toolkit_functions
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
-from mindroom.tool_system.toolkits import configure_toolkit_functions
+from mindroom.tool_system.toolkits import configure_toolkit_functions, toolkit_functions
 from tests.test_mcp_gateway_server import _HEADERS, _authenticate, _call, _cancel, _client
 from tests.test_mcp_gateway_tools import context  # noqa: F401
 

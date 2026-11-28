@@ -10,7 +10,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.catalog import get_tool_by_name
-from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.placement import tool_placement
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import publish_test_plugins
 

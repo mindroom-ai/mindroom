@@ -20,7 +20,6 @@ from mindroom.tool_system.authoring import (
     passthrough_tool,
     tool,
     tool_mark,
-    toolkit_functions,
 )
 from mindroom.tool_system.construction import ToolConstruction
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
@@ -38,6 +37,7 @@ from mindroom.tool_system.toolkits import (
     requires_connect,
     toolkit_function,
     toolkit_function_names,
+    toolkit_functions,
     toolkit_worker_stand_ins,
 )
 from tests.conftest import preserved_builtin_tools

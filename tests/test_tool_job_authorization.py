@@ -25,8 +25,8 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry, factory_origin
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.toolkits import toolkit_function_names
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity

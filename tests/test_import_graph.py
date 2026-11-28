@@ -119,6 +119,7 @@ _CLI_ROOTS = frozenset(
 )
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     "mindroom.desktop.protocol": frozenset({"dotenv"}),
+    "mindroom.egress_broker.env": frozenset({"dotenv"}),
     "mindroom.matrix.runtime_media": frozenset({"dotenv"}),
     "mindroom.matrix.provisioning_env": frozenset({"dotenv"}),
     "mindroom.cli.main": _CLI_ROOTS,
@@ -131,17 +132,21 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
     # The tool values keep their import footprint minimal; toolkits.py adapts authoring toolkits into them.
     "mindroom.tool_system.tool_function": frozenset({"dotenv"}),
-    # Plugin code authors tools through the owned API without loading Agno: the runtime context's config footprint.
-    "mindroom.tool_system.authoring": _CONFIG_LAYER_ROOTS - {"cryptography"},
+    "mindroom.tool_system.authoring": frozenset({"dotenv"}),
     # The owned schema generator reads annotations and docstrings and coerces arguments with pydantic.
     "mindroom.tool_system.tool_schema": frozenset(
         {"docstring_parser", "dotenv", "pydantic", "pydantic_core", "typing_extensions", "typing_inspection"},
     ),
+    "mindroom.tool_system.placement": frozenset(
+        {"annotated_types", "dotenv", "pydantic", "pydantic_core", "typing_extensions", "typing_inspection"},
+    ),
+    "mindroom.tool_system.settings": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
     "mindroom.tool_system.registration": _CONFIG_LAYER_ROOTS,
     # Plugins import their entry points without Agno: the registry footprint plus the OAuth helpers' clients
-    # (authlib, requests, and the httpx transport tree) and the provider registry's httpx2 client and tiktoken.
+    # (authlib, requests, and the httpx transport tree), toolkit schema generation (docstring_parser),
+    # and the provider registry's httpx2 client and tiktoken.
     "mindroom.plugin_api": _REGISTRY_ROOTS
     | _HTTPX_TRANSPORT_ROOTS
     | frozenset(
@@ -149,6 +154,7 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
             "authlib",
             "chardet",
             "charset_normalizer",
+            "docstring_parser",
             "httpx2",
             "requests",
             "socks",

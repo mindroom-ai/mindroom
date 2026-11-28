@@ -13,7 +13,7 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
     close_connected_toolkit,

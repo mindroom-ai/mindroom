@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
-from mindroom.egress_broker.env import egress_agent_scope
+from mindroom.egress_broker.agent_scope import egress_agent_scope
 from mindroom.requester_identity import is_platform_administrator
 
 if TYPE_CHECKING:

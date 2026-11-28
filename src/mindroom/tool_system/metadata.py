@@ -1,569 +1,52 @@
-"""Tool construction from a `ToolRegistry`, authored override validation, and tool metadata export."""
+"""Construct concrete toolkits from the tool registry and resolved settings."""
 
 from __future__ import annotations
 
-import math
-import os
-import re
-from dataclasses import asdict, dataclass, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.config.authored_overrides import AUTHORED_OVERRIDE_INHERIT
-from mindroom.config.legacy_fields import retired_stored_tool_setting, retired_tool_override
-from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.construction import ToolConstruction, tool_config_signature
-from mindroom.tool_system.declarations import (
-    ConfigField,
-    ToolAuthoredOverrideValidator,
-    ToolFileAccess,
-    ToolManagedInitArg,
-    ToolMetadata,
-    ToolValidationInfo,
-)
+from mindroom.tool_system.declarations import ToolManagedInitArg
 from mindroom.tool_system.dependencies import (
     auto_install_optional_extra_for_import_retry,
     ensure_tool_deps,
     optional_dependency_environment,
 )
-from mindroom.tool_system.filters import tool_name_allowed
-from mindroom.tool_system.registry import ToolMetadataValidationError, ToolRegistry, factory_origin
-from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings, tool_placement, worker_stand_ins
+from mindroom.tool_system.placement import tool_placement
+from mindroom.tool_system.registry import ToolMetadataValidationError, factory_origin
+from mindroom.tool_system.sandbox_proxy import worker_stand_ins
+from mindroom.tool_system.settings import (
+    load_toolkit_class,
+    offered_function_names,
+    pop_implicit_toolkit_filters,
+    resolve_tool_settings,
+)
 from mindroom.tool_system.worker_routing import (
-    ResolvedWorkerTarget,
     supports_tool_name_for_worker_scope,
     unsupported_shared_only_integration_message,
 )
 from mindroom.workers.named import named_workers_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Mapping
+    from collections.abc import Callable
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.authoring import Toolkit
+    from mindroom.tool_system.declarations import ToolMetadata
+    from mindroom.tool_system.registry import ToolRegistry
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
-
-# These verified media defaults supersede older provider SDK constructor defaults.
-# Keep unrelated optional settings under their existing SDK/default semantics.
-_MEDIA_MODEL_DEFAULT_FIELDS = {
-    "openai": ("transcription_model", "text_to_speech_model", "image_model"),
-    "gemini": ("image_generation_model", "video_generation_model"),
-    "groq": ("tts_model", "tts_voice"),
-    "cartesia": ("model_id",),
-    "eleven_labs": ("model_id",),
-    "fal": ("model",),
-    "replicate": ("model",),
-}
-
-_SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
-_TEXT_CONFIG_FIELD_TYPES = frozenset({"select", "string[]", "text", "url"})
-_TOOLKIT_FILTER_CONFIG_FIELDS = (
-    ConfigField(
-        name="include_tools",
-        label="Include Tools",
-        type="string[]",
-        required=False,
-        description="Optional allowlist of functions to register from this toolkit.",
-    ),
-    ConfigField(
-        name="exclude_tools",
-        label="Exclude Tools",
-        type="string[]",
-        required=False,
-        description="Optional denylist of functions to register from this toolkit.",
-    ),
-)
-
-
-class ToolInitOverrideError(ValueError):
-    """Raised when a caller supplies unsupported tool init overrides."""
-
-
-class ToolConfigOverrideError(ValueError):
-    """Raised when authored tool config overrides are invalid."""
-
-
-def _sanitize_safe_tool_init_override_value(
-    tool_name: str,
-    field_name: str,
-    value: object,
-) -> object:
-    """Validate one safe tool init override value."""
-    if field_name == "base_dir":
-        if value is None or isinstance(value, str):
-            return value
-        if isinstance(value, os.PathLike):
-            return os.fspath(value)
-        msg = f"Unsupported value for tool init override '{tool_name}.{field_name}': expected a string path or null."
-        raise ToolInitOverrideError(msg)
-
-    if field_name == "shell_path_prepend":
-        if value is None or isinstance(value, str):
-            return value
-        msg = (
-            f"Unsupported value for tool init override '{tool_name}.{field_name}': "
-            "expected a comma or newline-separated string path list or null."
-        )
-        raise ToolInitOverrideError(msg)
-
-    return value
-
-
-def _has_enable_toggles(metadata: ToolMetadata | ToolValidationInfo) -> bool:
-    return any(field.name.startswith("enable_") and field.authored_override for field in (metadata.config_fields or ()))
-
-
-def _override_path(
-    tool_name: str,
-    field_name: str,
-    *,
-    config_path_prefix: str | None,
-) -> str:
-    if config_path_prefix:
-        return f"{config_path_prefix}.{tool_name}.{field_name}"
-    return f"{tool_name}.{field_name}"
-
-
-def _agent_override_field(metadata: ToolMetadata | ToolValidationInfo, field_name: str) -> ConfigField | None:
-    """Return one tool's agent override field metadata when it exists."""
-    return next((candidate for candidate in metadata.agent_override_fields or () if candidate.name == field_name), None)
-
-
-def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[ConfigField, ...]:
-    """Return declared fields plus the universal toolkit function filters."""
-    fields = tuple(metadata.config_fields or ())
-    if not metadata.supports_toolkit_filters:
-        return fields
-    declared_names = {field.name for field in fields}
-    return fields + tuple(field for field in _TOOLKIT_FILTER_CONFIG_FIELDS if field.name not in declared_names)
-
-
-def _authored_tool_config_fields(
-    metadata: ToolMetadata | ToolValidationInfo,
-    *,
-    include_agent_only: bool = True,
-) -> tuple[ConfigField, ...]:
-    """Return fields that may be set on one authored tool entry."""
-    fields = _tool_config_fields(metadata)
-    if not include_agent_only:
-        return fields
-    declared_names = {field.name for field in fields}
-    return fields + tuple(field for field in (metadata.agent_override_fields or ()) if field.name not in declared_names)
-
-
-def _validate_text_authored_override_value(
-    field: ConfigField,
-    value: object,
-    *,
-    full_path: str,
-    metadata: ToolMetadata | ToolValidationInfo,
-) -> object:
-    """Validate one authored override for a text-like config field."""
-    agent_override_field = _agent_override_field(metadata, field.name)
-    try:
-        if field.type == "string[]":
-            values = _normalize_string_array_override(value, preserve_empty_list=True)
-            pattern = (field.validation or {}).get("pattern")
-            if pattern:
-                if values is None and isinstance(value, str):
-                    # A blank string must not read as unset, which leaves a limit such as a space list off.
-                    msg = f"{full_path}: expected a list of {field.label} entries; use [] for none."
-                    raise ToolConfigOverrideError(msg)
-                invalid = next((item for item in values or () if not re.fullmatch(pattern, item)), None)
-                if invalid is not None:
-                    example = f"; for example {field.placeholder}" if field.placeholder else ""
-                    msg = f"{full_path}: {invalid!r} is not a valid {field.label} entry{example}."
-                    raise ToolConfigOverrideError(msg)
-            return values
-        if agent_override_field is not None and agent_override_field.type == "string[]":
-            normalized = _normalize_string_array_override(value)
-            return None if normalized is None else ", ".join(normalized)
-    except TypeError as exc:
-        msg = f"{full_path}: {exc}."
-        raise ToolConfigOverrideError(msg) from exc
-    if not isinstance(value, str):
-        msg = f"{full_path}: expected a string or null."
-        raise ToolConfigOverrideError(msg)
-    return value
-
-
-def _validate_authored_override_value(
-    field: ConfigField,
-    value: object,
-    *,
-    full_path: str,
-    metadata: ToolMetadata | ToolValidationInfo,
-) -> object:
-    """Validate one authored override value against its declared config field type."""
-    if value is None or value == AUTHORED_OVERRIDE_INHERIT:
-        return value
-
-    if field.type in _TEXT_CONFIG_FIELD_TYPES:
-        return _validate_text_authored_override_value(
-            field,
-            value,
-            full_path=full_path,
-            metadata=metadata,
-        )
-
-    if field.type == "boolean":
-        if not isinstance(value, bool):
-            msg = f"{full_path}: expected a boolean or null."
-            raise ToolConfigOverrideError(msg)
-        return value
-
-    if field.type == "number":
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            msg = f"{full_path}: expected a number or null."
-            raise ToolConfigOverrideError(msg)
-        return value
-
-    return value
-
-
-def _validate_authored_file_access(
-    tool_name: str,
-    overrides: dict[str, object],
-    metadata: ToolMetadata | ToolValidationInfo,
-    *,
-    config_path_prefix: str | None,
-) -> dict[str, object]:
-    """Check an authored per-tool ``file_access`` key and drop it; it is never a constructor argument."""
-    if "file_access" not in overrides:
-        return overrides
-    remaining = dict(overrides)
-    value = remaining.pop("file_access")
-    path = _override_path(tool_name, "file_access", config_path_prefix=config_path_prefix)
-    if metadata.file_access is ToolFileAccess.UNCONFINED:
-        if value == "unconfined":
-            return remaining
-        isolation = (
-            "It cannot run in a worker, so enable it only for agents trusted with the primary runtime."
-            if metadata.requires_primary_runtime
-            else "Isolate it with worker_tools instead."
-        )
-        msg = (
-            f"{path}: {tool_name} is not confined by file_access, so its file access is always 'unconfined'. "
-            f"{isolation}"
-        )
-        raise ToolConfigOverrideError(msg)
-    msg = f"{path}: set file access per agent with agents.<name>.file_access or defaults.file_access, not per tool."
-    raise ToolConfigOverrideError(msg)
-
-
-def validate_authored_tool_entry_overrides(
-    tool_name: str,
-    overrides: dict[str, object] | None,
-    *,
-    config_path_prefix: str | None = None,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo],
-) -> dict[str, object]:
-    """Validate authored YAML overrides against one tool's declared config fields and its validation mode."""
-    if not overrides:
-        return {}
-
-    metadata = tool_metadata.get(tool_name)
-    if metadata is None:
-        msg = f"Unknown tool '{tool_name}'."
-        raise ToolConfigOverrideError(msg)
-
-    retired = retired_tool_override(
-        tool_name,
-        overrides,
-        retired_functions=getattr(metadata, "retired_functions", None),
-        has_enable_toggles=_has_enable_toggles(metadata),
-    )
-    if retired is not None:
-        field_name, guidance = retired
-        path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
-        msg = f"{path} was removed; {guidance}."
-        raise ToolConfigOverrideError(msg)
-    overrides = _validate_authored_file_access(
-        tool_name,
-        overrides,
-        metadata,
-        config_path_prefix=config_path_prefix,
-    )
-    fields_by_name = {
-        field.name: field
-        for field in _authored_tool_config_fields(
-            metadata,
-            include_agent_only=config_path_prefix is None or not config_path_prefix.startswith("defaults.tools"),
-        )
-    }
-    unexpected_fields = sorted(set(overrides) - set(fields_by_name))
-    if unexpected_fields:
-        unexpected = ", ".join(unexpected_fields)
-        allowed = ", ".join(sorted(name for name, field in fields_by_name.items() if field.authored_override)) or "none"
-        path = _override_path(tool_name, unexpected_fields[0], config_path_prefix=config_path_prefix)
-        msg = f"{path}: unknown authored override field(s): {unexpected}; remove or correct them. Allowed fields: {allowed}."
-        raise ToolConfigOverrideError(msg)
-
-    validated: dict[str, object] = {}
-    for field_name, value in overrides.items():
-        field = fields_by_name[field_name]
-        full_path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
-        if not field.authored_override:
-            reason = (
-                "authored overrides are not allowed for password fields; save the secret on the dashboard's Tools page."
-                if field.type == "password"
-                else "authored overrides are not allowed for this field."
-            )
-            msg = f"{full_path}: {reason}"
-            raise ToolConfigOverrideError(msg)
-        validated_value = _validate_authored_override_value(
-            field,
-            value,
-            full_path=full_path,
-            metadata=metadata,
-        )
-        if field.required and validated_value in (None, []):
-            msg = f"{full_path}: this field is required and cannot be empty."
-            raise ToolConfigOverrideError(msg)
-        validated[field_name] = validated_value
-    try:
-        _run_authored_override_validator(tool_name, validated, validator=metadata.authored_override_validator)
-    except ValueError as exc:
-        raise ToolConfigOverrideError(str(exc)) from exc
-    return validated
-
-
-def _run_authored_override_validator(
-    tool_name: str,
-    overrides: dict[str, object],
-    *,
-    validator: ToolAuthoredOverrideValidator,
-) -> None:
-    """Run one tool-specific authored-override validator against normalized overrides."""
-    if overrides and validator == ToolAuthoredOverrideValidator.MCP:
-        # Deferred: the MCP registry imports this module through the tool catalog.
-        from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
-
-        validate_mcp_agent_overrides(tool_name, overrides)
-
-
-def sanitize_tool_init_overrides(
-    tool_name: str,
-    tool_init_overrides: dict[str, object] | None,
-    *,
-    tool_metadata: Mapping[str, ToolMetadata],
-) -> dict[str, object] | None:
-    """Validate and retain only the explicitly safe runtime tool init overrides."""
-    if not tool_init_overrides:
-        return None
-
-    if tool_name not in tool_metadata:
-        msg = f"Unknown tool '{tool_name}'."
-        raise ToolInitOverrideError(msg)
-    allowed_fields = safe_tool_init_override_fields(tool_name, tool_metadata=tool_metadata)
-    unexpected_fields = sorted(set(tool_init_overrides) - allowed_fields)
-    if unexpected_fields:
-        allowed = ", ".join(sorted(allowed_fields)) or "none"
-        unexpected = ", ".join(unexpected_fields)
-        msg = f"Unsupported tool init override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
-        raise ToolInitOverrideError(msg)
-
-    return {
-        name: _sanitize_safe_tool_init_override_value(tool_name, name, tool_init_overrides[name])
-        for name in tool_init_overrides
-    }
-
-
-def safe_tool_init_override_fields(
-    tool_name: str,
-    *,
-    tool_metadata: Mapping[str, ToolMetadata],
-) -> frozenset[str]:
-    """Return the config fields a tool exposes as safe runtime init overrides."""
-    metadata = tool_metadata.get(tool_name)
-    if metadata is None:
-        return frozenset()
-    return frozenset(
-        field.name for field in metadata.config_fields or [] if field.name in _SAFE_TOOL_INIT_OVERRIDE_FIELDS
-    )
-
-
-def coerce_optional_finite_number(value: object) -> int | float | None:
-    """Normalize an optional finite number from runtime config text or JSON values."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise TypeError
-    if isinstance(value, int | float):
-        if math.isfinite(value):
-            return int(value) if isinstance(value, float) and value.is_integer() else value
-        raise OverflowError
-    if isinstance(value, str):
-        raw_value = value.strip()
-        if not raw_value:
-            return None
-        parsed = float(raw_value)
-        if not math.isfinite(parsed):
-            raise OverflowError
-        return int(parsed) if parsed.is_integer() else parsed
-    raise TypeError
-
-
-def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | None:
-    """Normalize a persisted dashboard number field before passing it to a tool constructor; None omits it."""
-    try:
-        return coerce_optional_finite_number(value)
-    except OverflowError as exc:
-        msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
-        raise ToolConfigOverrideError(msg) from exc
-    except (TypeError, ValueError) as exc:
-        msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
-        raise ToolConfigOverrideError(msg) from exc
-
-
-def _coerce_boolean_tool_config_value(tool_name: str, field_name: str, value: object) -> bool | None:
-    """Normalize a stored boolean field; env and file credential seeds always resolve to strings.
-
-    Only the spellings the dashboard also reads as booleans are accepted, so no stored value
-    can enable an option while the dashboard shows it disabled.
-    """
-    if value is None or isinstance(value, bool):
-        return value
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    msg = f"Stored config value for '{tool_name}.{field_name}' must be a boolean."
-    raise ToolConfigOverrideError(msg)
-
-
-def _apply_tool_config_init_values(
-    init_kwargs: dict[str, object],
-    *,
-    tool_name: str,
-    fields: tuple[ConfigField, ...],
-    values: dict[str, object] | None,
-    skip_inherited: bool = False,
-) -> None:
-    if not values:
-        return
-    for field in fields:
-        if field.name not in values:
-            continue
-        value = values[field.name]
-        if skip_inherited and value == AUTHORED_OVERRIDE_INHERIT:
-            continue
-        if field.type == "number":
-            value = _coerce_number_tool_config_value(tool_name, field.name, value)
-            if value is None:
-                continue
-        elif field.type == "boolean":
-            value = _coerce_boolean_tool_config_value(tool_name, field.name, value)
-        init_kwargs[field.name] = value
-
-
-def _tool_env_values(
-    fields: tuple[ConfigField, ...],
-    init_kwargs: dict[str, object],
-    runtime_paths: RuntimePaths,
-) -> dict[str, object]:
-    """Return the first usable declared variable of each unset field, read as ``RuntimePaths.first_env_value`` reads it.
-
-    The lowest settings layer, read in the process that builds the toolkit: a worker has its own environment and
-    never the primary's `.env`.
-    """
-    values: dict[str, object] = {}
-    for field in fields:
-        current = init_kwargs.get(field.name)
-        if current is not None and (not isinstance(current, str) or current.strip()):
-            continue
-        if (found := runtime_paths.first_env_value(field.env)) is not None:
-            values[field.name] = found[0]
-    return values
-
-
-def _build_tool_config_init_kwargs(
-    tool_name: str,
-    metadata: ToolMetadata,
-    *,
-    runtime_paths: RuntimePaths,
-    credentials: dict[str, object],
-    tool_config_overrides: dict[str, object] | None,
-    tool_init_overrides: dict[str, object] | None,
-    runtime_overrides: dict[str, object] | None,
-) -> dict[str, object]:
-    """Collect safe config-field kwargs for one tool constructor."""
-    fields = _tool_config_fields(metadata)
-    model_default_fields = _MEDIA_MODEL_DEFAULT_FIELDS.get(tool_name, ())
-    init_kwargs: dict[str, object] = {
-        field.name: field.default for field in fields if field.name in model_default_fields
-    }
-    _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=credentials)
-    _apply_tool_config_init_values(
-        init_kwargs,
-        tool_name=tool_name,
-        fields=_authored_tool_config_fields(metadata),
-        values=tool_config_overrides,
-        skip_inherited=True,
-    )
-    _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=tool_init_overrides)
-    _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=runtime_overrides)
-    _apply_tool_config_init_values(
-        init_kwargs,
-        tool_name=tool_name,
-        fields=fields,
-        values=_tool_env_values(fields, init_kwargs, runtime_paths),
-    )
-    if "base_dir" in init_kwargs and isinstance(init_kwargs["base_dir"], str):
-        init_kwargs["base_dir"] = Path(init_kwargs["base_dir"])
-    return init_kwargs
-
-
-def _pop_implicit_toolkit_filters(
-    metadata: ToolMetadata,
-    init_kwargs: dict[str, object],
-) -> tuple[list[str] | None, list[str] | None]:
-    """Remove universal filters that the concrete constructor did not declare."""
-    declared_names = {field.name for field in metadata.config_fields or ()}
-    include_tools, exclude_tools = (
-        None
-        if name in declared_names
-        else _normalize_string_array_override(init_kwargs.pop(name, None), preserve_empty_list=True)
-        for name in ("include_tools", "exclude_tools")
-    )
-    return include_tools, exclude_tools
-
-
-def _offered_function_names(
-    available: Collection[str],
-    *,
-    include_tools: list[str] | None,
-    exclude_tools: list[str] | None,
-    declared_functions: frozenset[str] = frozenset(),
-) -> frozenset[str] | None:
-    """Return the functions the universal filters keep of ``available``, the ones a toolkit offers; None keeps all.
-
-    Excluding a declared function that an option left disabled (such as chat_ui's show_canvas) is a
-    no-op, so the exclusion cannot drop the whole toolkit.
-    """
-    if include_tools is None and exclude_tools is None:
-        return None
-    missing_includes = sorted(set(include_tools or ()) - set(available))
-    if missing_includes:
-        msg = f"Included tool(s) not present in the toolkit: {', '.join(missing_includes)}"
-        raise ValueError(msg)
-    missing_excludes = sorted(set(exclude_tools or ()) - set(available) - declared_functions)
-    if missing_excludes:
-        msg = f"Excluded tool(s) not present in the toolkit: {', '.join(missing_excludes)}"
-        raise ValueError(msg)
-    included = set(include_tools) if include_tools is not None else None
-    excluded = set(exclude_tools or ())
-    return frozenset(name for name in available if tool_name_allowed(name, include=included, exclude=excluded))
 
 
 def _build_managed_tool_init_kwargs(
@@ -624,20 +107,6 @@ def _managed_file_access(runtime_config: Config | None, worker_target: ResolvedW
     return agent_file_access(runtime_config, worker_target.routing_agent_name if worker_target is not None else None)
 
 
-def _resolve_tool_credentials_manager(
-    metadata: ToolMetadata,
-    runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager | None,
-) -> CredentialsManager | None:
-    """Return the explicit runtime credential manager for tools that persist config."""
-    if credentials_manager is not None:
-        return credentials_manager
-
-    if metadata.config_fields or ToolManagedInitArg.CREDENTIALS_MANAGER in metadata.managed_init_args:
-        return get_runtime_credentials_manager(runtime_paths)
-    return None
-
-
 def _constructing_agent_runs_in_worker(
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -651,9 +120,6 @@ def _constructing_agent_runs_in_worker(
     an agent's explicit ``worker_tools`` can move it into a worker, never out of one, since the agent may not have
     that toolkit itself.
     """
-    # Imported here: agent tool resolution validates tool settings through this module.
-    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
-
     placement = tool_placement(runtime_paths, tools)
     if placement.runs_in_worker(tool_name, None):
         return True
@@ -672,154 +138,6 @@ def _sandbox_settings_route_workspace_tools(runtime_paths: RuntimePaths, tools: 
         placement.runs_in_worker(name, None)
         for name, metadata in tools.entries.items()
         if metadata.consumes_workspace_paths
-    )
-
-
-@dataclass(frozen=True)
-class _ToolSettings:
-    """The settings one tool is built with for one agent, and the validated overrides they apply."""
-
-    # Each config field's constructor argument: stored settings, then authored, init, and runtime overrides, then the
-    # environment for a field still unset.
-    values: dict[str, object]
-    tool_config_overrides: dict[str, object]
-    tool_init_overrides: dict[str, object] | None
-    # The credentials manager the stored settings came from, which the toolkit and its worker calls also use.
-    credentials_manager: CredentialsManager | None
-
-
-def offered_functions(
-    metadata: ToolMetadata,
-    settings: Mapping[str, object],
-    *,
-    validate_filters: bool = False,
-) -> tuple[frozenset[str] | None, bool]:
-    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
-
-    A function stays on by ``all`` or ``enable_<function>``, then the filters. The functions are None when the
-    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
-    names no writing functions writes when it runs code. Request filter validation only when the declared functions
-    and enable flags predict what the constructor registers, as they do for shell.
-    """
-    values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
-    include, exclude = (
-        _normalize_string_array_override(values.get(name), preserve_empty_list=True)
-        for name in ("include_tools", "exclude_tools")
-    )
-
-    def offered(names: Iterable[str], *, validate: bool = False) -> frozenset[str]:
-        enabled = frozenset(name for name in names if values.get("all") or values.get(f"enable_{name}", True))
-        if validate:
-            filtered = _offered_function_names(
-                enabled,
-                include_tools=include,
-                exclude_tools=exclude,
-                declared_functions=frozenset(metadata.function_names or ()),
-            )
-            return enabled if filtered is None else filtered
-        return frozenset(name for name in enabled if tool_name_allowed(name, include=include, exclude=exclude))
-
-    available = metadata.function_names or include
-    functions = None if available is None else offered(available, validate=validate_filters)
-    if not metadata.workspace_writers:
-        return functions, metadata.executes_code
-    return functions, bool(offered(metadata.workspace_writers))
-
-
-def resolve_tool_settings(
-    tool_name: str,
-    runtime_paths: RuntimePaths,
-    *,
-    tools: ToolRegistry,
-    worker_target: ResolvedWorkerTarget | None,
-    credentials_manager: CredentialsManager | None = None,
-    allowed_shared_services: frozenset[str] | None = None,
-    credential_overrides: dict[str, object] | None = None,
-    tool_config_overrides: dict[str, object] | None = None,
-    tool_init_overrides: dict[str, object] | None = None,
-    runtime_overrides: dict[str, object] | None = None,
-) -> _ToolSettings:
-    """Resolve the settings ``tool_name`` in ``tools`` is built with for the agent ``worker_target`` names.
-
-    Stored settings come from the agent's scoped store over the shared layer ``allowed_shared_services`` grants, never
-    from a store worker code can write when this primary owns the tool's settings. Raises ``ToolConfigOverrideError``
-    or ``ToolInitOverrideError`` for an override the tool does not accept.
-    """
-    metadata = tools.entries[tool_name]
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(
-        tool_name,
-        tool_config_overrides,
-        tool_metadata=tools.entries,
-    )
-    resolved_credentials_manager = _resolve_tool_credentials_manager(metadata, runtime_paths, credentials_manager)
-
-    def stored(service: str) -> dict[str, Any] | None:
-        if resolved_credentials_manager is None:
-            return None
-        return load_scoped_credentials(
-            service,
-            credentials_manager=resolved_credentials_manager,
-            worker_target=worker_target,
-            allowed_shared_services=allowed_shared_services,
-            primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
-        )
-
-    stored_credentials = stored(tool_name)
-    # LEGACY_COMPAT: Dashboard settings stored for the file and coding tools.
-    # Legacy format: a stored settings document under service file or coding, saved from the Tools dashboard, holding
-    #   Agno FileTools switches or an include_tools or exclude_tools filter.
-    # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit reads service filesystem.
-    # Handling: Refuse to resolve the toolkit's settings while such a document holds any setting, so the toolkit is
-    #   not built and grants no workspace write until the operator deletes it; the dashboard reads and deletes it
-    #   in the store read here.
-    # Coverage:
-    #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant;
-    #   tests/test_credentials.py::test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads.
-    # LEGACY_COMPAT: Dashboard-saved `allowed_tools` under service `dynamic_workflow`.
-    # Legacy format: Operators could save `allowed_tools` on the Tools page under service `dynamic_workflow`.
-    # Last legacy release: v2026.11.590; replacement: unreleased; `workflow` inherits its caller's tools.
-    # Handling: Ignore retired `allowed_tools` stored under `dynamic_workflow` so `workflow` still builds cleanly;
-    #   keep rejecting any other stored key under `dynamic_workflow` and all other aliases.
-    # Coverage: tests/test_dynamic_workflow_alias.py::test_dashboard_stored_dynamic_workflow_allowed_tools_does_not_block_workflow.
-    for alias, name in TOOL_ALIASES.items():
-        if name == tool_name and any(
-            not key.startswith("_") and not (alias == "dynamic_workflow" and key == "allowed_tools")
-            for key in stored(alias) or ()
-        ):
-            msg = (
-                f"{tool_name}: settings stored under '{alias}' no longer apply; "
-                f"delete them, and save any you still want under '{tool_name}'."
-            )
-            raise ToolConfigOverrideError(msg)
-    if (
-        retired := retired_stored_tool_setting(
-            tool_name,
-            stored_credentials or {},
-            retired_functions=metadata.retired_functions,
-            has_enable_toggles=_has_enable_toggles(metadata),
-        )
-    ) is not None:
-        msg = f"{tool_name}: stored setting {retired[0]} was removed; {retired[1]}."
-        raise ToolConfigOverrideError(msg)
-    credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
-    safe_tool_init_overrides = sanitize_tool_init_overrides(
-        tool_name,
-        tool_init_overrides,
-        tool_metadata=tools.entries,
-    )
-    return _ToolSettings(
-        values=_build_tool_config_init_kwargs(
-            tool_name,
-            metadata,
-            runtime_paths=runtime_paths,
-            credentials=credentials,
-            tool_config_overrides=validated_tool_config_overrides,
-            tool_init_overrides=safe_tool_init_overrides,
-            runtime_overrides=runtime_overrides,
-        ),
-        tool_config_overrides=validated_tool_config_overrides,
-        tool_init_overrides=safe_tool_init_overrides,
-        credentials_manager=resolved_credentials_manager,
     )
 
 
@@ -939,7 +257,7 @@ def get_tool_by_name(
                 in_sandbox_request=in_sandbox_request,
             ),
         )
-        include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
+        include_tools, exclude_tools = pop_implicit_toolkit_filters(metadata, init_kwargs)
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
         available = toolkit_function_names(toolkit)
@@ -948,7 +266,7 @@ def get_tool_by_name(
         if unknown_aliases:
             msg = f"Tool '{tool_name}' declares approval aliases for functions it does not have: {', '.join(unknown_aliases)}"
             raise ToolMetadataValidationError(msg)
-        offered = _offered_function_names(
+        offered = offered_function_names(
             available,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
@@ -977,12 +295,6 @@ def get_tool_by_name(
         return toolkit
 
     return _build_with_tool_dependencies(tool_name, metadata, runtime_paths, build)
-
-
-def load_toolkit_class[T: type](factory: Callable[[], T]) -> T:
-    """Return the toolkit class ``factory`` registers."""
-    with optional_dependency_environment():
-        return factory()
 
 
 def _build_with_tool_dependencies(
@@ -1028,178 +340,3 @@ def _build_with_tool_dependencies(
         except ImportError as second_error:
             logger.warning("tool_auto_install_failed", tool_name=tool_name, error=str(second_error))
             raise second_error from first_error
-
-
-def serialize_tool_validation_snapshot(
-    tool_validation_snapshot: Mapping[str, ToolValidationInfo],
-) -> dict[str, dict[str, object]]:
-    """Export one validation snapshot as a JSON-serializable object."""
-    return {
-        tool_name: {
-            "config_fields": [asdict(field) for field in info.config_fields],
-            "agent_override_fields": [asdict(field) for field in info.agent_override_fields],
-            "authored_override_validator": info.authored_override_validator.value,
-            "file_access": info.file_access.value,
-            "supports_toolkit_filters": info.supports_toolkit_filters,
-            "requires_room_context": info.requires_room_context,
-            "requires_primary_runtime": info.requires_primary_runtime,
-            "runtime_loadable": info.runtime_loadable,
-            "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
-            "retired_functions": dict(info.retired_functions),
-        }
-        for tool_name, info in sorted(tool_validation_snapshot.items())
-    }
-
-
-def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) -> tuple[ConfigField, ...]:
-    """Deserialize one serialized config-field list from a validation snapshot."""
-    if raw_fields is None:
-        return ()
-    if not isinstance(raw_fields, list):
-        msg = f"{field_name} must be a list of config field objects."
-        raise TypeError(msg)
-    fields: list[ConfigField] = []
-    for index, raw_field in enumerate(raw_fields):
-        if not isinstance(raw_field, dict):
-            msg = f"{field_name}[{index}] must be an object."
-            raise TypeError(msg)
-        fields.append(ConfigField(**cast("dict[str, Any]", raw_field)))
-    return tuple(fields)
-
-
-def _deserialize_tool_validation_info(tool_name: str, raw_info: object) -> ToolValidationInfo:
-    if not isinstance(raw_info, dict):
-        msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
-        raise TypeError(msg)
-    raw_info_mapping = cast("dict[str, object]", raw_info)
-    raw_validator = raw_info_mapping.get(
-        "authored_override_validator",
-        ToolAuthoredOverrideValidator.DEFAULT.value,
-    )
-    try:
-        authored_override_validator = ToolAuthoredOverrideValidator(raw_validator)
-    except ValueError as exc:
-        msg = (
-            f"Tool validation snapshot entry for '{tool_name}' has unsupported "
-            f"authored_override_validator '{raw_validator}'."
-        )
-        raise TypeError(msg) from exc
-    raw_file_access = raw_info_mapping.get("file_access", ToolFileAccess.NONE.value)
-    try:
-        file_access = ToolFileAccess(raw_file_access)
-    except ValueError as exc:
-        msg = f"Tool validation snapshot entry for '{tool_name}' has unsupported file_access '{raw_file_access}'."
-        raise TypeError(msg) from exc
-    flags: dict[str, bool] = {}
-    for field_name in (
-        "runtime_loadable",
-        "unavailable_due_to_plugin_load_error",
-        "requires_room_context",
-        "requires_primary_runtime",
-        "supports_toolkit_filters",
-    ):
-        if field_name in raw_info_mapping:
-            value = raw_info_mapping[field_name]
-            if not isinstance(value, bool):
-                msg = f"Tool validation snapshot entry for '{tool_name}' must set {field_name} to a boolean."
-                raise TypeError(msg)
-            flags[field_name] = value
-    raw_retired = raw_info_mapping.get("retired_functions", {})
-    if not isinstance(raw_retired, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in raw_retired.items()
-    ):
-        msg = f"Tool validation snapshot entry for '{tool_name}' must set retired_functions to a string mapping."
-        raise TypeError(msg)
-    return ToolValidationInfo(
-        name=tool_name,
-        config_fields=_deserialize_tool_validation_fields(
-            raw_info_mapping.get("config_fields", []),
-            field_name=f"{tool_name}.config_fields",
-        ),
-        agent_override_fields=_deserialize_tool_validation_fields(
-            raw_info_mapping.get("agent_override_fields", []),
-            field_name=f"{tool_name}.agent_override_fields",
-        ),
-        authored_override_validator=authored_override_validator,
-        file_access=file_access,
-        retired_functions=dict(raw_retired),
-        **flags,
-    )
-
-
-def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValidationInfo]:
-    """Deserialize one JSON payload into validation-only tool metadata."""
-    if not isinstance(payload, dict):
-        msg = "Tool validation snapshot must be a JSON object keyed by tool name."
-        raise TypeError(msg)
-
-    snapshot: dict[str, ToolValidationInfo] = {}
-    for tool_name, raw_info in payload.items():
-        if not isinstance(tool_name, str):
-            msg = "Tool validation snapshot must be a JSON object keyed by tool name."
-            raise TypeError(msg)
-        snapshot[tool_name] = _deserialize_tool_validation_info(tool_name, raw_info)
-    return snapshot
-
-
-def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dict[str, Any]]:
-    """Export tool metadata as JSON-serializable dictionaries."""
-    tools: list[dict[str, Any]] = []
-
-    for metadata in tool_metadata.values():
-        # asdict copies every value deeply, which code such as a judge bound to a lock cannot survive.
-        tool_dict = asdict(replace(metadata, factory=None, approval_aliases={}))
-        tool_dict["category"] = metadata.category.value
-        tool_dict["status"] = metadata.status.value
-        tool_dict["setup_type"] = metadata.setup_type.value
-        tool_dict["default_execution_target"] = metadata.default_execution_target.value
-        tool_dict["file_access"] = metadata.file_access.value
-        if metadata.oauth_fallback_fields:
-            tool_dict["oauth_fallback_fields"] = list(metadata.oauth_fallback_fields)
-        else:
-            tool_dict.pop("oauth_fallback_fields", None)
-        if not metadata.requires_primary_runtime:
-            tool_dict.pop("requires_primary_runtime", None)
-        tool_dict.pop("approval_aliases", None)
-        tool_dict.pop("action_scoped_grants", None)
-        tool_dict.pop("retired_functions", None)
-        tool_dict.pop("authored_override_validator", None)
-        tool_dict.pop("managed_init_args", None)
-        tool_dict.pop("workspace_writers", None)
-        tool_dict.pop("supports_toolkit_filters", None)
-        tool_dict.pop("factory", None)
-        tool_dict.pop("mcp_server_id", None)
-        tool_dict.pop("dependency_extra", None)
-        if aliases := sorted(alias for alias, name in TOOL_ALIASES.items() if name == metadata.name):
-            tool_dict["aliases"] = aliases
-        tools.append(tool_dict)
-
-    tools.sort(key=lambda tool: (tool["category"], tool["name"]))
-    return tools
-
-
-def _normalize_string_array_override(
-    value: object,
-    *,
-    preserve_empty_list: bool = False,
-) -> list[str] | None:
-    """Normalize a string-array authored override from a list or legacy text value."""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        values = [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
-        return values or None
-    if not isinstance(value, list):
-        msg = "expected a list of strings or a comma/newline-separated string"
-        raise TypeError(msg)
-    normalized: list[str] = []
-    for entry in value:
-        if not isinstance(entry, str):
-            msg = "expected a list of strings"
-            raise TypeError(msg)
-        stripped = entry.strip()
-        if stripped:
-            normalized.append(stripped)
-    if normalized or preserve_empty_list:
-        return normalized
-    return None

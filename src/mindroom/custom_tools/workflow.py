@@ -33,9 +33,9 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.invocation import current_tool_call
-from mindroom.tool_system.metadata import resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.settings import resolve_tool_settings
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.tools.native_helpers import validate_action_params

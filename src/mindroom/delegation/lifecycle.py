@@ -18,7 +18,7 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.config.models import unsupported_level_message
-from mindroom.constants import runtime_matrix_homeserver
+from mindroom.constants import MAX_DELEGATION_DEPTH, runtime_matrix_homeserver
 from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.audit import (
     ChildAudit,
@@ -81,8 +81,6 @@ if TYPE_CHECKING:
     from mindroom.workers.models import ScriptResourceProfileName
 
 logger = get_logger(__name__)
-
-MAX_DELEGATION_DEPTH = 3
 
 type _DelegationGrant = Literal["delegate", "workflow"]
 

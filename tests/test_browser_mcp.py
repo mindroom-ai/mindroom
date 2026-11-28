@@ -17,6 +17,7 @@ from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
@@ -63,7 +64,6 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
     from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
-    from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
     from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
         ToolExecutionIdentity,
         build_agent_toolkit_worker_target,

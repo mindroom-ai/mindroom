@@ -68,7 +68,8 @@ from mindroom.shell.supervisor import (
     background_script_supervision_supported,
     ensure_shell_supervisor,
 )
-from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
+from mindroom.tool_system.placement import sandbox_proxy_config
+from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,

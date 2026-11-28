@@ -182,7 +182,8 @@ Matrix sync callback
 | `oauth/legacy_spotify_credentials.py` | Tokens the former Spotify routes stored, adopted once into a scope's OAuth store when that store is created |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `egress_broker/` | Agent Keys: the egress broker in the primary that adds stored keys or connected-account tokens to worker HTTP(S) requests the worker never sees |
-| `egress_broker/env.py` | Whether the broker and its personal page are on, the one rule for which agents use Agent Keys (`egress_credentials` plus `shell`), and the call env overlay |
+| `egress_broker/env.py` | Broker and personal-page feature flags, per-call environment overlays, and runner CA bundle setup |
+| `egress_broker/agent_scope.py` | Which agents use Agent Keys (`egress_credentials` plus `shell`), whose credentials they use, and whether the shell runs in the primary |
 | `egress_broker/service.py` | Broker lifecycle on its own thread, secret resolution per verified worker scope, and the per-call broker env for worker-routed calls and primary shell calls |
 | `egress_broker/proxy.py` | Authenticated forward-proxy listener: CONNECT interception or blind tunnels, plain HTTP forwarding, and the unmatched-host policy |
 | `egress_broker/mitm.py` | TLS interception for hosts with rules: `Host` checks against the CONNECT target and per-request credential injection |
@@ -556,7 +557,8 @@ Matrix sync callback
 | `matrix_rtc/audio_child.py` | Child process that runs one GPT-Live call's LiveKit room, frame encryption, and agent session away from the MindRoom event loop |
 | `matrix_rtc/audio_protocol.py` | Length-prefixed JSON frames between MindRoom and a call's audio process |
 | `tool_system/agent_tools.py` | The toolkits one agent may use per turn (`AgentTools.candidates`) and where each runs |
-| `tool_system/sandbox_proxy.py` | The one tool placement decision (`ToolPlacement`) and the proxy that routes worker calls |
+| `tool_system/placement.py` | Sandbox settings and the decision to run a tool in the primary or in a worker |
+| `tool_system/sandbox_proxy.py` | Routes tool calls and attachment transfers to workers |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `api/sandbox_execute_stream.py` | Streams one runner call's progress and keep-alives before its result, and stops the call when the primary hangs up |
 | `api/worker_preview.py` | Dedicated-worker runner routes that list the ports the worker's own apps listen on at its loopback and relay the primary's HTTP requests and WebSockets to them, or to a plugin's running worker service with its secret, refusing other containers' servers and the runner's own port |
@@ -652,12 +654,14 @@ Matrix sync callback
 | `tool_system/call_record.py` | Context-scoped recorder the tool hook bridge tells of each tool call before it runs, which reply spans persist |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
-| `tool_system/metadata.py` | Tool construction from a `ToolRegistry`, authored override validation, and metadata export |
+| `tool_system/metadata.py` | Toolkit construction from a registry and resolved settings |
+| `tool_system/settings.py` | Tool settings resolution, authored override validation, and metadata and validation snapshot export |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope), the identity a call runs as (`current_execution_identity`, detached and team-member scopes), and the hook bindings a turn carries |
-| `tool_system/tool_function.py` | The tool values the agent loop sees: `ToolFunction` (finished schema, the gate that says why a call waits, the stop flag, entrypoint) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
-| `tool_system/authoring.py` | MindRoom's tool authoring API, which built-in tools use and plugins import: `Toolkit`, `@tool`, `passthrough_tool` for a function offered with the schema it authors, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name as a run calls them |
+| `tool_system/tool_function.py` | The tool values the agent loop sees: `ToolFunction` (finished schema, the gate that says why a call waits, the stop flag, entrypoint) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and normalized media, and `ToolOutcome`, a call's value with its stop and failure flags |
+| `tool_system/authoring.py` | The tool authoring API: `Toolkit`, `@tool`, `passthrough_tool` for authored schemas, and `current_call()` |
+| `tool_system/context_scope.py` | Active tool call, conversation, and detached-requester context scopes |
 | `tool_system/tool_schema.py` | Derives the description and parameter schema of every tool function whose signature gives them from its docstring and annotations (with `Any` and `object` accepting any JSON value and `*args`/`**kwargs` left out of the schema), and validates a call's arguments against them |
-| `tool_system/toolkits.py` | Adapts native `authoring.Toolkit` instances and callables to `ToolFunction`, applying configured function filters, output files, and worker stand-ins; handles function names, single-function lookup, aliases, connection flags, reserved-parameter filtering, stream collection, and `ToolValue` normalization |
+| `tool_system/toolkits.py` | Adapts authored toolkits and callables to `ToolFunction`, with configured filters, output files, and worker stand-ins; also provides `toolkit_functions()` and collects streamed tool results |
 | `tool_system/toolkit_connections.py` | Connects the `requires_connect` toolkits, such as Postgres, around each run that offers them, and holds the per-call toolkit lifetime (connect, owned bodies, close, retained cleanup) the script broker and MCP gateway share |
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |

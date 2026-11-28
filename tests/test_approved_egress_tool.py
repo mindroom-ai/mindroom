@@ -19,8 +19,9 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
 from mindroom.egress.policy import EgressGrantSubject
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import ToolConfigOverrideError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, subagent_worker_key
 from mindroom.tools import approved_egress as approved_egress_module
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement

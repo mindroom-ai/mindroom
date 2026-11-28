@@ -16,8 +16,9 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
+from mindroom.tool_system.sandbox_proxy import worker_call
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity

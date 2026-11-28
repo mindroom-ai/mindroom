@@ -55,7 +55,7 @@ from mindroom.config.egress_broker import EgressService
 from mindroom.config.egress_presets import EGRESS_PRESETS
 from mindroom.config.main import validation_issue_message
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker.env import EgressAgentScope, egress_agent_scope
+from mindroom.egress_broker.agent_scope import EgressAgentScope, egress_agent_scope
 from mindroom.egress_broker.key_access import egress_key_access
 from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
 from mindroom.egress_broker.oauth_source import broker_credential_context

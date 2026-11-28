@@ -26,7 +26,8 @@ from mindroom.approval.tool_approval import resolve_tool_approval_approver
 from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import validation_issue_message
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker.env import egress_agent_scope, personal_page_served
+from mindroom.egress_broker.agent_scope import egress_agent_scope
+from mindroom.egress_broker.env import personal_page_served
 from mindroom.egress_broker.key_access import egress_key_access, service_key_refusal
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status

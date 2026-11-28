@@ -18,8 +18,8 @@ from urllib.parse import urlsplit
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.runtime_state import get_api_server_address
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tools.shell import shell_refuses_commands
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.docker_config import DOCKER_HOST_ALIAS

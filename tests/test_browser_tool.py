@@ -53,9 +53,9 @@ from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolManagedInitArg
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit

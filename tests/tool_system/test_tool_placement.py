@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system import placement
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.workers.backend import WorkerBackendError
 
@@ -65,7 +65,7 @@ def _env(
 def _placement(runtime_paths: RuntimePaths, tool_name: str, worker_tools: tuple[str, ...] | None) -> str:
     """Return 1 for the worker, 0 for the primary, and E when the settings are rejected."""
     try:
-        routed = sandbox_proxy.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
+        routed = placement.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
             tool_name,
             worker_tools,
         )

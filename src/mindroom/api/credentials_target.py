@@ -29,8 +29,8 @@ from mindroom.credentials.manager import (
     save_scoped_credentials,
 )
 from mindroom.credentials.policy import is_global_credential_service
+from mindroom.tool_system.placement import primary_owns_tool_settings
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
