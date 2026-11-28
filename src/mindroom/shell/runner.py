@@ -249,16 +249,16 @@ class ActiveCommand:
         await self._drain_readers()
         if self.spool is not None:
             self.spool.incomplete = True
-        hint = self.spill.publish() if self.spill is not None else None
+        saved = await self.spill.publish() if self.spill is not None else None
         message = format_shell_timeout(
-            *self._render_partial(hint),
+            *self._render_partial(saved.hint if saved else None),
             timeout=timeout,
             no_output_file=self.output_capture is not None,
         )
         if self.output_capture is None:
             return ShellRunResult(
-                message,
-                output_file_handled=hint is not None,
+                saved.bound_preview(message, status=f"Stopped after {timeout:g}s.") if saved else message,
+                output_file_handled=saved is not None,
                 return_code=self.managed.returncode,
                 timed_out=True,
             )
@@ -299,7 +299,7 @@ class ActiveCommand:
             if self.output_capture is not None:
                 self.output_capture.close()
 
-    def finish_result(self) -> ShellRunResult:
+    async def finish_result(self) -> ShellRunResult:
         """Format or publish the result of a command that finished in the foreground."""
         return_code = self.managed.returncode
         assert return_code is not None
@@ -316,13 +316,16 @@ class ActiveCommand:
                 )
             finally:
                 self.output_capture.close()
-        hint = self.spill.publish() if self.spill is not None and not readers_cancelled else None
+        saved = await self.spill.publish() if self.spill is not None and not readers_cancelled else None
+        hint = saved.hint if saved else None
         if return_code:
             # A failure keeps its whole stderr, which explains it.
             message = format_shell_completion(*self._render_partial(hint), return_code=return_code)
         else:
             message = format_shell_success(self.stdout_buf, self.stderr_buf, self.tail, spill_hint=hint)
-        return ShellRunResult(message, output_file_handled=hint is not None, return_code=return_code)
+        if saved:
+            message = saved.bound_preview(message, status=f"Exit code {return_code}" if return_code else "")
+        return ShellRunResult(message, output_file_handled=saved is not None, return_code=return_code)
 
 
 async def run_foreground(
@@ -369,6 +372,6 @@ async def run_foreground(
             except asyncio.CancelledError:
                 await started.cancel_and_cleanup()
                 raise
-        return started.finish_result()
+        return await started.finish_result()
     finally:
         started.close_spill()

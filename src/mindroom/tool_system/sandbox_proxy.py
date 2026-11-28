@@ -22,11 +22,16 @@ import httpx
 
 from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.config.tool_aliases import canonical_tool_name
-from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
+from mindroom.constants import (
+    DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+    EXECUTION_ENV_TOOL_NAMES,
+    RETAINED_MEDIA_MAX_BYTES,
+    build_execution_tool_env,
+)
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.background_scope import current_shell_background_scope
-from mindroom.shell.output_capture import rewrite_shell_spill_hint
+from mindroom.shell.output_capture import format_named_shell_spill
 from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
@@ -897,18 +902,25 @@ def _format_named_worker_result(
     *,
     header: str,
     admitted_sandbox: WorkerSandboxConfig | None,
+    auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
 ) -> object:
     """Prepend the named-worker header and rewrite sandboxed saved-output paths."""
     if isinstance(result, str) or (isinstance(result, ToolOutcome) and result.saved_output is None):
         content = result if isinstance(result, str) else result.content
-        if (
-            admitted_sandbox is not None
-            and admitted_sandbox.mount_dir is not None
-            and not admitted_sandbox.mount_read_only
-            and not structured_result_requested()
-        ):
-            content = rewrite_shell_spill_hint(content, admitted_sandbox.mount_dir)
-        shown = f"{header}\n{content}"
+        shown = None
+        if not structured_result_requested():
+            shown = format_named_shell_spill(
+                content,
+                worker_header=header,
+                mount_dir=(
+                    admitted_sandbox.mount_dir
+                    if admitted_sandbox is not None and not admitted_sandbox.mount_read_only
+                    else None
+                ),
+                auto_save_threshold_bytes=auto_save_threshold_bytes,
+            )
+        if shown is None:
+            shown = f"{header}\n{content}"
         return shown if isinstance(result, str) else replace(result, content=shown)
     if isinstance(result, ToolOutcome):
         updated = _format_named_worker_result(result.saved_output, header=header, admitted_sandbox=admitted_sandbox)
@@ -1162,6 +1174,11 @@ def _call_proxy_sync(
                 result,
                 header=header or named.header(worker_handle),
                 admitted_sandbox=admitted_sandbox,
+                auto_save_threshold_bytes=(
+                    stand_ins.runtime_config.defaults.tool_output_auto_save_threshold_bytes
+                    if stand_ins.runtime_config is not None
+                    else DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+                ),
             )
         return result
 

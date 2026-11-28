@@ -333,7 +333,12 @@ def _shell_output_policies(*, allow_spill: bool) -> tuple[ShellOutputDestination
         )
         return destination, None
     if allow_spill and not structured_result_requested():
-        return None, ShellSpillPolicy(root, policy.max_bytes, policy.tools_use_workdir)
+        return None, ShellSpillPolicy(
+            root,
+            policy.max_bytes,
+            policy.auto_save_threshold_bytes,
+            policy.tools_use_workdir,
+        )
     return None, None
 
 

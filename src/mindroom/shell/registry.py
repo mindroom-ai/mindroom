@@ -262,7 +262,7 @@ class ProcessRegistry:
             if isinstance(started, ShellRunResult):
                 return started
             if not immediate and not await started.wait_or_timeout(timeout=timeout, on_progress=on_progress):
-                return started.finish_result()
+                return await started.finish_result()
             return await self._adopt_background(
                 started,
                 namespace=namespace,

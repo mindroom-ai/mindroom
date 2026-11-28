@@ -11,6 +11,7 @@ import signal
 import stat
 import sys
 import tempfile
+import threading
 import time
 from ast import literal_eval
 from dataclasses import dataclass, replace
@@ -20,10 +21,11 @@ from typing import TYPE_CHECKING, BinaryIO
 import pytest
 
 from mindroom.api import sandbox_runner
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import DEFAULT_TOOL_OUTPUT_MAX_BYTES, resolve_runtime_paths
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.shell import output_capture
 from mindroom.shell.background_scope import shell_background_scope
-from mindroom.shell.output import ShellOutputBuffer
+from mindroom.shell.output import ShellOutputBuffer, SpoolCapture
 from mindroom.shell.output_capture import ShellOutputDestination, ShellOutputSpill, ShellSpillPolicy
 from mindroom.shell.registry import ProcessRegistry
 from mindroom.shell.runner import ActiveCommand, run_foreground
@@ -848,7 +850,7 @@ async def test_wrapped_shell_spills_both_streams_once(
     """Both local and supervised tools retain heads and tails, and the wrapper does not auto-save the tailed reply."""
     configure_toolkit_functions(
         shell_toolkit,
-        output_files=ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=64, tools_use_workdir=stderr_cap),
+        output_files=ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=512, tools_use_workdir=stderr_cap),
     )
     out_count = 10_001 if stdout_cap else 2
     err_count = 10_001 if stderr_cap else 2
@@ -881,10 +883,39 @@ async def test_wrapped_shell_spills_both_streams_once(
         == 1
     )
     assert "Redirect command output" not in value
+    assert len(value.encode("utf-8")) <= 512
     assert (
         saved.read_text()
         == "out-start\n" + "o\n" * out_count + "out-end\nStderr:\n" + "err-start\n" + "e\n" * err_count + "err-end"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 17])
+async def test_two_hard_capped_lines_share_one_bounded_inline_preview(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+    exit_code: int,
+) -> None:
+    """Long UTF-8 lines in both streams keep the path and exit status but cannot bypass the inline budget."""
+    budget = 513
+    policy = ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=budget)
+    configure_toolkit_functions(shell_toolkit, output_files=policy)
+    script = f"import sys; print('é' * 31000); print('雪' * 21000, file=sys.stderr); sys.exit({exit_code})"
+    value = (await _run(shell_toolkit, {"args": [sys.executable, "-c", script], "timeout": 10})).result
+    if exit_code:
+        assert isinstance(value, ToolOutcome)
+        assert value.is_error
+        assert not value.counts_as_tool_failure
+        assert value.saved_output is None
+        value = value.content
+        assert value.startswith(f"Exit code {exit_code}\n")
+    assert isinstance(value, str)
+    (saved,) = (tmp_path / "mindroom_tool_outputs").iterdir()
+    assert value.count(f"Full output saved to {saved.relative_to(tmp_path)}") == 1
+    assert len(value.encode("utf-8")) <= budget
+    assert value.endswith("雪" * 40)
+    assert saved.read_text() == "é" * 31000 + "\nStderr:\n" + "雪" * 21000 + "\n"
 
 
 _LARGE_OUTPUT = "print('x' * 52000, flush=True)"
@@ -898,7 +929,7 @@ async def _run_with_spill(root: Path, script: str = _LARGE_OUTPUT, *, timeout_se
         cwd=None,
         tail=1,
         timeout=timeout_seconds,
-        spill_policy=ShellSpillPolicy(str(root), 100_000),
+        spill_policy=ShellSpillPolicy(str(root), 100_000, auto_save_threshold_bytes=512),
     )
 
 
@@ -927,21 +958,68 @@ async def test_structured_shell_skips_spill_even_when_hard_capped(shell_toolkit:
     assert not (tmp_path / "mindroom_tool_outputs").exists()
 
 
-def test_spill_cap_is_combined_and_does_not_split_utf8(tmp_path: Path) -> None:
-    """Seed both streams before the losing append, budget their raw bytes together, stop at a UTF-8 boundary."""
+@pytest.mark.asyncio
+async def test_spill_cap_is_combined_and_does_not_split_utf8(tmp_path: Path) -> None:
+    """Seed both streams, budget payload plus framing, and stop at a UTF-8 boundary."""
     stdout, stderr = ShellOutputBuffer(max_bytes=4), ShellOutputBuffer(max_bytes=4)
-    spill = ShellOutputSpill(ShellSpillPolicy(str(tmp_path), 9), stdout, stderr)
+    spill = ShellOutputSpill(ShellSpillPolicy(str(tmp_path), 18, auto_save_threshold_bytes=512), stdout, stderr)
     try:
         for is_stderr, chunk in [(False, "é\n"), (True, "err"), (False, "x🙂"), (True, "!"), (False, "!")]:
             spill.append(chunk, is_stderr=is_stderr)
             (stderr if is_stderr else stdout).append(chunk)
-        hint = spill.publish()
+        receipt = await spill.publish()
         (saved,) = (tmp_path / "mindroom_tool_outputs").iterdir()
-        assert hint is not None
-        assert hint.startswith(f"First 9 bytes saved to mindroom_tool_outputs/{saved.name}")
-        assert saved.read_text() == "é\nx\nStderr:\nerr\n[Spill truncated at 9 bytes; command output continued.]\n"
+        assert receipt is not None
+        assert receipt.hint.startswith(f"First 18 bytes saved to mindroom_tool_outputs/{saved.name}")
+        assert saved.read_text() == "é\nx\nStderr:\nerr"
     finally:
         spill.close()
+
+
+@pytest.mark.asyncio
+async def test_spill_at_file_size_limit_can_be_read_by_workspace_tool(tmp_path: Path) -> None:
+    """A spill at the real read limit leaves room for stderr framing and is readable with pagination."""
+    cap = DEFAULT_TOOL_OUTPUT_MAX_BYTES
+    stdout, stderr = ShellOutputBuffer(), ShellOutputBuffer()
+    stdout.append("first page\n")
+    spill = ShellOutputSpill(ShellSpillPolicy(str(tmp_path), cap, auto_save_threshold_bytes=512), stdout, stderr)
+    chunk = "e" * (1024 * 1024)
+    try:
+        for _ in range(cap // len(chunk) + 1):
+            spill.append(chunk, is_stderr=True)
+        receipt = await spill.publish()
+    finally:
+        spill.close()
+    assert receipt is not None
+    assert receipt.truncated_at is not None
+    assert 0 < (tmp_path / receipt.path).stat().st_size <= cap
+    page = FilesystemTools(base_dir=str(tmp_path)).read_file(str(receipt.path), offset=1, limit=1)
+    assert page.startswith("1| first page\n")
+    assert "Use offset=2 to continue" in page
+
+
+@pytest.mark.asyncio
+async def test_spill_copy_does_not_block_the_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop can reach another task while the file publisher is blocked in I/O."""
+    loop = asyncio.get_running_loop()
+    copying = asyncio.Event()
+    release = threading.Event()
+    write = output_capture._write_spill
+
+    def slow_write(spool: SpoolCapture, target: BinaryIO) -> None:
+        loop.call_soon_threadsafe(copying.set)
+        assert release.wait(timeout=3)
+        write(spool, target)
+
+    monkeypatch.setattr(output_capture, "_write_spill", slow_write)
+    task = asyncio.create_task(_run_with_spill(tmp_path))
+    try:
+        await asyncio.wait_for(copying.wait(), timeout=5)
+        assert not task.done()
+    finally:
+        release.set()
+        result = await task
+    assert result.output_file_handled
 
 
 @pytest.mark.asyncio
@@ -966,7 +1044,7 @@ async def test_spill_errors_fall_back_without_writing_outside_workspace(
 
     if failure == "disk_write":
 
-        def fail_write(_capture: object, target: BinaryIO, _trailer: str) -> None:
+        def fail_write(_capture: SpoolCapture, target: BinaryIO) -> None:
             target.write(b"incomplete")
             raise disk_error()
 
@@ -1025,17 +1103,20 @@ async def test_inline_timeout_publishes_capped_partial_spill(tmp_path: Path) -> 
     assert result.output_file_handled
     assert result.message.startswith("Stopped after 1s.")
     (saved,) = (tmp_path / "mindroom_tool_outputs").iterdir()
+    assert str(saved.relative_to(tmp_path)) in result.message
+    assert len(result.message.encode("utf-8")) <= 512
     assert saved.read_bytes() == b"x" * 52000 + b"\n"
 
 
 @pytest.fixture
-def spill_files(monkeypatch: pytest.MonkeyPatch) -> tuple[list[BinaryIO], asyncio.Event]:
+def spill_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[BinaryIO], asyncio.Event]:
     """Observe real spool allocation and release without relying on a subprocess startup delay."""
     temporary_file = tempfile.TemporaryFile
     files: list[BinaryIO] = []
     opened = asyncio.Event()
 
     def observe(*, dir: str | None) -> BinaryIO:  # noqa: A002
+        assert dir == str(tmp_path)
         stream = temporary_file(dir=dir)
         files.append(stream)
         if len(files) == 2:
@@ -1097,7 +1178,7 @@ async def test_adoption_disables_spill_even_if_not_yet_active(
             cwd=str(tmp_path),
             tail=1,
             timeout=1,
-            spill_policy=ShellSpillPolicy(str(tmp_path), 200_000),
+            spill_policy=ShellSpillPolicy(str(tmp_path), 200_000, auto_save_threshold_bytes=512),
         )
         assert result.handle is not None
         assert not result.output_file_handled

@@ -1805,9 +1805,8 @@ async def test_read_stream_paces_only_capped_bursts_without_active_capture(tmp_p
         assert pace_calls == 0
 
         buffer = ShellOutputBuffer(max_bytes=8)
-        with contextlib.closing(
-            ShellOutputSpill(ShellSpillPolicy(str(tmp_path), 1024), buffer, ShellOutputBuffer()),
-        ) as spill:
+        policy = ShellSpillPolicy(str(tmp_path), 1024, auto_save_threshold_bytes=512)
+        with contextlib.closing(ShellOutputSpill(policy, buffer, ShellOutputBuffer())) as spill:
             await drain_text_stream(make_stream(one_burst), buffer, extra_sinks=[spill.append])
             assert (pace_calls, spill.publish() is not None) == (1, True)
 

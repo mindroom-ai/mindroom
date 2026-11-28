@@ -967,6 +967,28 @@ def test_named_worker_rewrites_only_the_spill_hint_in_an_unstructured_writable_m
         assert display(writable) == replace(failure, content=unchanged)
 
 
+def test_named_worker_budgets_the_spill_preview_after_rewriting_its_path() -> None:
+    """Routing adds bytes; the final result still keeps its status and mount-relative link within budget."""
+    relative = f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt"
+    prefix = (
+        f"Stopped after 1s.\n[Inline preview clipped. Full output saved to {relative}"
+        " (inspect in parts with read_file offset/limit or grep/sed).]\n"
+    )
+    budget = 512
+    message = prefix + "x" * (budget - len(prefix))
+    result = sandbox_proxy_module._format_named_worker_result(
+        ToolOutcome(content=message, is_error=True, counts_as_tool_failure=False),
+        header="[worker: build]",
+        admitted_sandbox=WorkerSandboxConfig(mount_dir="jobs/build"),
+        auto_save_threshold_bytes=budget,
+    )
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert result.content.startswith("[worker: build]\nStopped after 1s.\n")
+    assert f"Full output saved to jobs/build/{relative} " in result.content
+    assert len(result.content.encode("utf-8")) <= budget
+
+
 def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Proxy wrapping should preserve the augmented output-path schema and forward the kwarg."""
     captured: dict[str, Any] = {}
