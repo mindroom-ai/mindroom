@@ -21,7 +21,15 @@ __all__ = ["RealtimeTTS"]
 class RealtimeTTS(tts.TTS):
     """Speak each segment of a call reply with a ``gpt-realtime`` model."""
 
-    def __init__(self, *, model: str, api_key: str, base_url: str | None = None, voice: str = "alloy") -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        base_url: str | None = None,
+        voice: str = "alloy",
+        speed: float | None = None,
+    ) -> None:
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False),
             sample_rate=REALTIME_SPEECH_SAMPLE_RATE,
@@ -31,6 +39,12 @@ class RealtimeTTS(tts.TTS):
         self._api_key = api_key
         self._base_url = base_url
         self._voice = voice
+        self._speed = speed
+
+    def update_options(self, *, speed: float | None = None) -> None:
+        """Update the speaking rate for subsequent synthesized segments."""
+        if speed is not None:
+            self._speed = speed
 
     @property
     def model(self) -> str:
@@ -71,6 +85,7 @@ class _RealtimeChunkedStream(tts.ChunkedStream):
                 voice=self._realtime_tts._voice,
                 api_key=self._realtime_tts._api_key,
                 base_url=self._realtime_tts._base_url,
+                speed=self._realtime_tts._speed,
             ):
                 output_emitter.push(chunk)
         except RealtimeSpeechError as error:

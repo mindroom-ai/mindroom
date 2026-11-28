@@ -40,6 +40,35 @@ _MODERATION_ENDED_NOTICE = (
 )
 
 
+def _live_speaking_rate_instruction(rate: float) -> str:
+    """Translate a numeric speaking rate into a concise standing GPT-Live pacing rule."""
+    if rate <= 0.65:
+        return (
+            f"Standing pacing rule: speak very slowly and deliberately (about {rate:g}x normal speed). "
+            "Lengthen vowels and syllables smoothly rather than inserting silences between words, "
+            "keeping every word clear and unhurried."
+        )
+    if rate < 1.0:
+        return (
+            f"Standing pacing rule: speak slower than normal (about {rate:g}x speed). "
+            "Stretch syllables gently with a calm, steady rhythm instead of adding pauses or silences between words."
+        )
+    if rate == 1.0:
+        return (
+            "Standing pacing rule: speak at a normal, natural conversational pace (1x speed), "
+            "resetting any previous slower or faster pacing adjustment."
+        )
+    if rate <= 1.25:
+        return (
+            f"Standing pacing rule: speak briskly and fluently (about {rate:g}x normal speed) "
+            "with crisp, connected articulation, brief pauses, and clear intelligibility."
+        )
+    return (
+        f"Standing pacing rule: speak quickly and briskly (about {rate:g}x normal speed) "
+        "with tight, fluent, connected articulation and minimal pauses while staying clearly intelligible."
+    )
+
+
 def _commentary_chunks(text: str) -> Iterator[str]:
     """Stay below Live's 500-token append limit using a conservative byte cap."""
     start = 0
@@ -218,7 +247,9 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
     options: LiveVoiceAgentOptions,
     instructions: str,
     suppress_wrapped_error: Callable[[], None],
-) -> Agent:
+    *,
+    startup_speed: float | None = None,
+) -> tuple[Agent, Callable[[float], None]]:
     """Load the optional SDK only when a Live call starts."""
     from livekit.agents import Agent  # noqa: PLC0415
     from livekit.plugins.openai.realtime import GPTLiveSession  # noqa: PLC0415
@@ -237,6 +268,12 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             self._voice_started_at = time.time()
             self._voice_usage: dict[str, LiveVoiceUsage] = {}
             self._usage_tasks: set[asyncio.Task[None]] = set()
+            self._speaking_rate: float | None = None
+
+        def set_speaking_rate(self, rate: float) -> None:
+            self._speaking_rate = rate
+            if self._live_session is not None and not self._exiting:
+                self._live_session.append_instructions(_live_speaking_rate_instruction(rate))
 
         async def on_enter(self) -> None:
             session = self.duplex_session
@@ -249,6 +286,8 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             session.on("session_reconnected", self._on_reconnected)
             session.on("openai_server_event_received", self._on_server_event)
             session.on("openai_client_event_queued", self._on_client_event)
+            if self._speaking_rate is not None:
+                session.append_instructions(_live_speaking_rate_instruction(self._speaking_rate))
 
         def _on_delegation(self, event: GPTLiveDelegation) -> None:
             # A delegation can follow the accepted start in the same receive-loop turn.
@@ -260,6 +299,13 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             self._awaiting_replacement_start = self._recovery_deadline is not None
             if self._delegations is not None:
                 self._delegations.on_reconnected()
+            if (
+                self._live_session is not None
+                and not self._exiting
+                and self._speaking_rate is not None
+                and self._speaking_rate != startup_speed
+            ):
+                self._live_session.append_instructions(_live_speaking_rate_instruction(self._speaking_rate))
 
         def _on_client_event(self, event: dict[str, Any]) -> None:
             if self._delegations is not None:
@@ -413,7 +459,8 @@ def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
             if self._usage_tasks:
                 await asyncio.gather(*self._usage_tasks)
 
-    return LiveCallAgent()
+    agent = LiveCallAgent()
+    return agent, agent.set_speaking_rate
 
 
 class LiveVoiceBridge(RealtimeVoiceBridge):
@@ -422,7 +469,15 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
     def __init__(self, *, local_identity: str, e2ee_enabled: bool) -> None:
         super().__init__(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
         self._live_agent: Agent | None = None
+        self._set_live_speaking_rate: Callable[[float], None] | None = None
         self._suppress_wrapped_error = False
+
+    def set_speaking_rate(self, rate: float) -> None:
+        """Adjust GPT-Live speaking pace via standing session instructions."""
+        if self._set_live_speaking_rate is not None:
+            self._set_live_speaking_rate(rate)
+        else:
+            self._pending_speaking_rate = rate
 
     def _mark_moderation_error(self) -> None:
         # The SDK emits the wrapped error synchronously after the raw event and drops its code.
@@ -453,6 +508,10 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         if options.close_responder is not None:
             self._owned_speech_resource_closers += (options.close_responder,)
         instructions = await options.get_instructions()
+        startup_speed = self._pending_speaking_rate if self._pending_speaking_rate is not None else options.speed
+        self._pending_speaking_rate = None
+        if startup_speed is not None and startup_speed != 1.0:
+            instructions = f"{instructions}\n\n{_live_speaking_rate_instruction(startup_speed)}"
         model = GPTLiveModel(
             model=options.model,
             api_key=options.api_key,
@@ -465,7 +524,12 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         )
         self._owned_speech_resource_closers += (model.aclose,)
         session = AgentSession(llm=model)
-        self._live_agent = _build_live_agent(options, instructions, self._mark_moderation_error)
+        self._live_agent, self._set_live_speaking_rate = _build_live_agent(
+            options,
+            instructions,
+            self._mark_moderation_error,
+            startup_speed=startup_speed,
+        )
         await self._start_session(session, self._live_agent, options, rtc_module=rtc, room_io_module=room_io)
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)
@@ -473,6 +537,7 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
     async def aclose(self) -> None:
         """Settle delegates before the parent closes the normal agent cache."""
         agent, self._live_agent = self._live_agent, None
+        self._set_live_speaking_rate = None
         try:
             if agent is not None:
                 await agent.on_exit()

@@ -88,6 +88,8 @@ class _AudioChild:
             self._request(message["id"], self._bridge.connect(SfuGrant(url=message["url"], jwt=message["jwt"])))
         elif kind == "StartAgent":
             self._request(message["id"], self._bridge.start_agent(self._agent_options(message)))
+        elif kind == "SetSpeakingRate":
+            self._bridge.set_speaking_rate(message["speed"])
         elif kind in {"RespondResult", "RespondError"}:
             self._resolve_response(message)
         elif kind == "Close":
@@ -126,6 +128,7 @@ class _AudioChild:
             model=message["model"],
             api_key=message["api_key"],
             voice=message["voice"],
+            speed=message.get("speed"),
             respond=self._respond,
             record_usage=self._record_usage,
             greeting_instructions=message.get("greeting_instructions"),

@@ -11,7 +11,7 @@ from livekit.agents.llm import ChatContext
 from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 from structlog.testing import capture_logs
 
-from mindroom.matrix_rtc.live_voice_agent import _LiveDelegationRunner
+from mindroom.matrix_rtc.live_voice_agent import _live_speaking_rate_instruction, _LiveDelegationRunner
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse, LiveVoiceAgentOptions
 
 if TYPE_CHECKING:
@@ -338,3 +338,30 @@ async def test_live_delegation_times_each_stage_and_matches_acks_by_client_event
     for delegation_id in ("one", "two"):
         elapsed = [entry["elapsed_ms"] for entry in stages if entry["delegation_id"] == delegation_id]
         assert elapsed == sorted(elapsed)
+
+
+@pytest.mark.parametrize(
+    ("rate", "expected_fragments", "is_reset"),
+    [
+        (0.5, ("0.5x", "very slowly", "silences"), False),
+        (0.8, ("0.8x", "slower", "syllables"), False),
+        (0.95, ("0.95x", "slower", "syllables"), False),
+        (1.0, ("1x", "normal", "resetting"), True),
+        (1.05, ("1.05x", "briskly", "connected"), False),
+        (1.15, ("1.15x", "briskly", "connected"), False),
+        (1.4, ("1.4x", "quickly", "connected"), False),
+    ],
+)
+def test_live_speaking_rate_instruction_bands_are_concise_and_clear(
+    rate: float,
+    expected_fragments: tuple[str, ...],
+    *,
+    is_reset: bool,
+) -> None:
+    """Every GPT-Live pacing band stays under the 500-token cap and reserves 1x reset wording for exact 1.0."""
+    instruction = _live_speaking_rate_instruction(rate)
+    assert len(instruction.encode("utf-8")) < 480
+    lowered = instruction.lower()
+    for fragment in expected_fragments:
+        assert fragment in lowered
+    assert ("resetting" in lowered) is is_reset
