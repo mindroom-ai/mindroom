@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.shell.output import (
@@ -16,12 +17,15 @@ from mindroom.shell.output import (
     format_shell_completion,
     format_shell_success,
     format_shell_timeout,
+    split_spill_hint,
 )
-from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputSpill
 from mindroom.shell.process import ManagedProcess, classify_launch_failure
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mindroom.shell.output_capture import ShellOutputDestination, ShellSpillPolicy
 
 POST_EXIT_READER_GRACE_SECONDS = 0.5
 
@@ -97,7 +101,8 @@ class ActiveCommand:
     started_at: float
     tail: int
     kill_group_after_exit: bool
-    _extra_sinks: list[Callable[[str], None]]
+    _extra_sinks: tuple[list[Callable[[str], None]], list[Callable[[str], None]]]
+    spill: ShellOutputSpill | None
 
     @classmethod
     async def start(
@@ -108,6 +113,7 @@ class ActiveCommand:
         cwd: str | None,
         tail: int,
         output_destination: ShellOutputDestination | None = None,
+        spill_policy: ShellSpillPolicy | None = None,
         spool: SpoolCapture | None = None,
         stdin: int | None = None,
         stderr: int = asyncio.subprocess.PIPE,
@@ -142,13 +148,20 @@ class ActiveCommand:
 
         active_spool = capture.spool if capture is not None else spool
         stdout_buf, stderr_buf = ShellOutputBuffer(), ShellOutputBuffer()
-        extra_sinks: list[Callable[[str], None]] = []
+        stdout_sinks: list[Callable[[str], None]] = []
+        stderr_sinks: list[Callable[[str], None]] = []
+        spill = None
+        if spill_policy is not None and active_spool is None:
+            # A dynamic sink observes pre-trim text without bypassing capped-read pacing.
+            spill = ShellOutputSpill(spill_policy, stdout_buf, stderr_buf)
+            stdout_sinks.append(spill.append)
+            stderr_sinks.append(partial(spill.append, is_stderr=True))
         stdout_reader = asyncio.create_task(
             drain_text_stream(
                 managed.stdout,
                 stdout_buf,
                 active_spool.stdout if active_spool else None,
-                extra_sinks=extra_sinks,
+                extra_sinks=stdout_sinks,
             ),
         )
         stderr_reader = asyncio.create_task(
@@ -156,7 +169,7 @@ class ActiveCommand:
                 managed.stderr,
                 stderr_buf,
                 active_spool.stderr if active_spool else None,
-                extra_sinks=extra_sinks,
+                extra_sinks=stderr_sinks,
             ),
         )
         return cls(
@@ -170,12 +183,20 @@ class ActiveCommand:
             started_at,
             tail,
             kill_group_after_exit,
-            extra_sinks,
+            (stdout_sinks, stderr_sinks),
+            spill,
         )
 
     def add_output_sink(self, sink: Callable[[str], None]) -> None:
         """Forward all subsequent decoded stdout/stderr chunks to *sink*."""
-        self._extra_sinks.append(sink)
+        for sinks in self._extra_sinks:
+            sinks.append(sink)
+
+    def close_spill(self) -> None:
+        """Release any spill spools, preventing background readers from starting another spill."""
+        if self.spill is not None:
+            self.spill.close()
+            self.spill = None
 
     async def _drain_readers(self, *, grace_seconds: float = POST_EXIT_READER_GRACE_SECONDS) -> None:
         done, pending = await asyncio.wait((self.stdout_reader, self.stderr_reader), timeout=grace_seconds)
@@ -215,20 +236,32 @@ class ActiveCommand:
             raise
         return False
 
+    def _render_partial(self, spill_hint: str | None) -> tuple[str, str | None]:
+        stdout_hint, stderr_hint = split_spill_hint(self.stdout_buf, spill_hint)
+        return (
+            self.stdout_buf.render(tail=self.tail, spill_hint=stdout_hint),
+            self.stderr_buf.render(spill_hint=stderr_hint) if self.stderr_buf else None,
+        )
+
     async def _stop_timed_out(self, *, timeout: float) -> ShellRunResult:  # noqa: ASYNC109
-        """Stop a timed-out command and report its output so far; a stopped command saves no output file."""
+        """Stop a timed-out command and report its output so far, saving a partial spill if active."""
         await self.managed.terminate_tree()
         await self._drain_readers()
         if self.spool is not None:
             self.spool.incomplete = True
+        hint = self.spill.publish() if self.spill is not None else None
         message = format_shell_timeout(
-            self.stdout_buf.render(tail=self.tail),
-            self.stderr_buf.render() if self.stderr_buf else None,
+            *self._render_partial(hint),
             timeout=timeout,
             no_output_file=self.output_capture is not None,
         )
         if self.output_capture is None:
-            return ShellRunResult(message, return_code=self.managed.returncode, timed_out=True)
+            return ShellRunResult(
+                message,
+                output_file_handled=hint is not None,
+                return_code=self.managed.returncode,
+                timed_out=True,
+            )
         self.output_capture.incomplete = True
         self.output_capture.interruption = message
         try:
@@ -283,13 +316,13 @@ class ActiveCommand:
                 )
             finally:
                 self.output_capture.close()
+        hint = self.spill.publish() if self.spill is not None and not readers_cancelled else None
         if return_code:
             # A failure keeps its whole stderr, which explains it.
-            errors = self.stderr_buf.render() if self.stderr_buf else None
-            message = format_shell_completion(self.stdout_buf.render(tail=self.tail), errors, return_code=return_code)
+            message = format_shell_completion(*self._render_partial(hint), return_code=return_code)
         else:
-            message = format_shell_success(self.stdout_buf, self.stderr_buf, self.tail)
-        return ShellRunResult(message, return_code=return_code)
+            message = format_shell_success(self.stdout_buf, self.stderr_buf, self.tail, spill_hint=hint)
+        return ShellRunResult(message, output_file_handled=hint is not None, return_code=return_code)
 
 
 async def run_foreground(
@@ -301,6 +334,7 @@ async def run_foreground(
     timeout: float | None,  # noqa: ASYNC109
     on_progress: Callable[[str], None] | None = None,
     output_destination: ShellOutputDestination | None = None,
+    spill_policy: ShellSpillPolicy | None = None,
     spool: SpoolCapture | None = None,
     stdin: int | None = None,
     stderr: int = asyncio.subprocess.PIPE,
@@ -318,6 +352,7 @@ async def run_foreground(
         cwd=cwd,
         tail=tail,
         output_destination=output_destination,
+        spill_policy=spill_policy,
         spool=spool,
         stdin=stdin,
         stderr=stderr,
@@ -326,11 +361,14 @@ async def run_foreground(
     )
     if isinstance(started, ShellRunResult):
         return started
-    if await started.wait_or_timeout(timeout=timeout, on_progress=on_progress):
-        assert timeout is not None
-        try:
-            return await started._stop_timed_out(timeout=timeout)
-        except asyncio.CancelledError:
-            await started.cancel_and_cleanup()
-            raise
-    return started.finish_result()
+    try:
+        if await started.wait_or_timeout(timeout=timeout, on_progress=on_progress):
+            assert timeout is not None
+            try:
+                return await started._stop_timed_out(timeout=timeout)
+            except asyncio.CancelledError:
+                await started.cancel_and_cleanup()
+                raise
+        return started.finish_result()
+    finally:
+        started.close_spill()

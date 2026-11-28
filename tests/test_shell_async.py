@@ -33,6 +33,7 @@ from mindroom.shell.output import (
     drain_text_stream,
     format_auto_background_message,
 )
+from mindroom.shell.output_capture import ShellOutputSpill, ShellSpillPolicy
 from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.shell.process import ManagedProcess
 from mindroom.shell.registry import BackgroundProcess, ProcessRegistry
@@ -1419,7 +1420,11 @@ async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer
         recent.write_text("live", encoding="utf-8")
         recent_files.append(recent)
     with background_log_module._open_log_dir(log_dir) as dir_fd:
-        background_log_module._sweep_old_log_files(dir_fd, active_names=set())
+        background_log_module.sweep_generated_output(
+            dir_fd,
+            name_pattern=background_log_module._BACKGROUND_LOG_NAME_RE,
+            active_names=set(),
+        )
     assert not expired.exists()
     assert not old_evict.exists()
     assert unrelated.exists()
@@ -1643,8 +1648,12 @@ async def test_read_stream_paces_only_capped_bursts_without_active_capture(tmp_p
         active.file.close()
         assert pace_calls == 0
 
-        await drain_text_stream(make_stream(one_burst), ShellOutputBuffer(max_bytes=8))
-        assert pace_calls == 1
+        buffer = ShellOutputBuffer(max_bytes=8)
+        with contextlib.closing(
+            ShellOutputSpill(ShellSpillPolicy(str(tmp_path), 1024), buffer, ShellOutputBuffer()),
+        ) as spill:
+            await drain_text_stream(make_stream(one_burst), buffer, extra_sinks=[spill.append])
+            assert (pace_calls, spill.publish() is not None) == (1, True)
 
         overflow = SpoolStream(max_bytes=10, directory=str(tmp_path))
         await drain_text_stream(make_stream(one_burst), ShellOutputBuffer(max_bytes=8), overflow)

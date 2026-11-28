@@ -60,6 +60,18 @@ class ShellOutputBuffer:
     # the same size, and which stream printed last.
     last_append: int = 0
 
+    @property
+    def capped(self) -> bool:
+        """Return whether the buffer has dropped output at either hard limit."""
+        return self.bytes_capped or self.lines_capped
+
+    def would_cap(self, text: str) -> bool:
+        """Tell a sink whether appending text would lose data, before the buffer changes."""
+        return bool(text) and (
+            self.byte_count + len(text.encode("utf-8", errors="replace")) > self.max_bytes
+            or self.retained_newlines + text.count("\n") + (not text.endswith("\n")) > self.max_lines
+        )
+
     def append(self, text: str) -> None:
         """Append decoded output text, trimming oldest chunks to stay within byte and line bounds."""
         if not text:
@@ -97,11 +109,17 @@ class ShellOutputBuffer:
         text = self.text()
         return text.removesuffix("\n").split("\n") if text else []
 
-    def render(self, *, tail: int | None = None) -> str:
+    def render(self, *, tail: int | None = None, spill_hint: str | None = None) -> str:
         """Return the last ``tail`` retained lines, after one notice of what was left out."""
-        return "\n".join(part for part in self.render_parts(tail=tail) if part)
+        return "\n".join(part for part in self.render_parts(tail=tail, spill_hint=spill_hint) if part)
 
-    def render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
+    def render_parts(
+        self,
+        *,
+        tail: int | None = None,
+        stream: str = "",
+        spill_hint: str | None = None,
+    ) -> tuple[str, str]:
         """Return the notice of what was left out, empty when nothing was, and the last ``tail`` retained lines."""
         lines = self.lines()
         shown = lines if tail is None else lines[-tail:]
@@ -119,11 +137,11 @@ class ShellOutputBuffer:
             noun = stream or "output"
             cuts.append(f"{noun if cuts else noun.capitalize()} truncated to the last {' and '.join(caps)}")
         advice = (
-            "Redirect command output to a file for complete results."
+            ("Redirect command output to a file for complete results." if spill_hint is None else spill_hint)
             if caps
             else "Pass a larger tail, or narrow the command."
         )
-        return f"[{'; '.join(cuts)}. {advice}]", "\n".join(shown)
+        return f"[{'; '.join(cuts)}.{f' {advice}' if advice else ''}]", "\n".join(shown)
 
     def __len__(self) -> int:
         """Return the number of retained lines currently held in the buffer."""
@@ -236,22 +254,28 @@ class ShellOutputProgress:
 class SpoolStream:
     """Spool decoded text into a bounded anonymous tempfile without retaining it in memory."""
 
-    def __init__(self, *, max_bytes: int, directory: str | None = None) -> None:
+    def __init__(self, *, max_bytes: int, directory: str | None = None, truncate_on_cap: bool = False) -> None:
         self.file: BinaryIO = tempfile.TemporaryFile(dir=directory)  # noqa: SIM115
         self.max_bytes = max_bytes
         self.byte_count = 0
         self.error: str | None = None
         self.reached_eof = False
+        self._truncate_on_cap = truncate_on_cap
+        self._cap_hit = False
 
-    def append(self, text: str) -> None:
-        """Count decoded output, and spool it until the cap or a storage error is reached."""
+    def append(self, text: str, *, other_bytes: int = 0) -> None:
+        """Count decoded output and spool it up to the cap, optionally shared with another stream."""
         payload = text.encode("utf-8", errors="replace")
+        remaining = self.max_bytes - self.byte_count - other_bytes
         self.byte_count += len(payload)
-        if self.error is not None or self.file.closed:
+        if self.truncated or self.file.closed:
             return
-        if self.byte_count > self.max_bytes:
-            self.error = f"Redirected shell output exceeds the {self.max_bytes} byte limit."
-            return
+        if len(payload) > remaining:
+            if not self._truncate_on_cap:
+                self.error = f"Redirected shell output exceeds the {self.max_bytes} byte limit."
+                return
+            self._cap_hit = True
+            payload = payload[: max(0, remaining)].decode("utf-8", errors="ignore").encode("utf-8")
         try:
             self.file.write(payload)
         except OSError:
@@ -266,7 +290,7 @@ class SpoolStream:
     @property
     def truncated(self) -> bool:
         """Return whether output was dropped past ``max_bytes`` or lost to a capture error."""
-        return self.error is not None
+        return self._cap_hit or self.error is not None
 
     def read(self) -> str:
         """Read the retained complete stream as UTF-8 text."""
@@ -292,10 +316,10 @@ class SpoolStream:
 class SpoolCapture:
     """Caller-owned bounded tempfile spool for a command's stdout and stderr."""
 
-    def __init__(self, *, max_bytes: int, directory: str | None = None) -> None:
-        self.stdout = SpoolStream(max_bytes=max_bytes, directory=directory)
+    def __init__(self, *, max_bytes: int, directory: str | None = None, truncate_on_cap: bool = False) -> None:
+        self.stdout = SpoolStream(max_bytes=max_bytes, directory=directory, truncate_on_cap=truncate_on_cap)
         try:
-            self.stderr = SpoolStream(max_bytes=max_bytes, directory=directory)
+            self.stderr = SpoolStream(max_bytes=max_bytes, directory=directory, truncate_on_cap=truncate_on_cap)
         except BaseException:
             self.stdout.close()
             raise
@@ -337,10 +361,24 @@ def format_shell_timeout(stdout: str, stderr: str | None, *, timeout: float, no_
     return "\n".join(lines)
 
 
-def format_shell_success(stdout_buf: ShellOutputBuffer, stderr_buf: ShellOutputBuffer, tail: int) -> str:
+def split_spill_hint(stdout_buf: ShellOutputBuffer, hint: str | None) -> tuple[str | None, str | None]:
+    """Put the hint on the first capped stream, suppressing redirect advice on the other one."""
+    if hint is None:
+        return None, None
+    return (hint, "") if stdout_buf.capped else ("", hint)
+
+
+def format_shell_success(
+    stdout_buf: ShellOutputBuffer,
+    stderr_buf: ShellOutputBuffer,
+    tail: int,
+    *,
+    spill_hint: str | None = None,
+) -> str:
     """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
-    output_notice, output = stdout_buf.render_parts(tail=tail)
-    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr")
+    stdout_hint, stderr_hint = split_spill_hint(stdout_buf, spill_hint)
+    output_notice, output = stdout_buf.render_parts(tail=tail, spill_hint=stdout_hint)
+    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr", spill_hint=stderr_hint)
     completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
     return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
 
@@ -408,11 +446,7 @@ def _count_capped_read(
     capped_reads: int,
 ) -> tuple[int, int]:
     """Update rotating-stream counters once output is capped without an active capture."""
-    if (
-        (buf.bytes_capped or buf.lines_capped)
-        and (capture is None or capture.error is not None)
-        and not stream.at_eof()
-    ):
+    if buf.capped and (capture is None or capture.truncated) and not stream.at_eof():
         capped_bytes += chunk_len
         if chunk_len < _CAPPED_STREAM_SMALL_READ_BYTES or capped_bytes >= _CAPPED_STREAM_BULK_FREE_BYTES:
             capped_reads += 1

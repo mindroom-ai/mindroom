@@ -8813,10 +8813,11 @@ def test_shell_direct_supervised_dispatch_output_files_run_off_loop(
         track_thread(output_files_module._write_atomic, atomic_threads),
     )
 
-    payload_size = output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES + 1024
+    # Cross the generic auto-save threshold without triggering either stream's hard cap.
+    stream_size = output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES // 2 + 512
     with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
         auto_saved = post_shell(
-            rf"head -c {payload_size} /dev/zero | tr '\0' 'x'",
+            rf"head -c {stream_size} /dev/zero | tr '\0' 'x'; head -c {stream_size} /dev/zero | tr '\0' 'y' >&2",
             base_dir=str(workspace),
         )
         explicit = post_shell(
@@ -8832,8 +8833,7 @@ def test_shell_direct_supervised_dispatch_output_files_run_off_loop(
     assert receipt["status"] == "saved_to_file"
     assert receipt["auto_saved"] is True
     saved_text = (workspace / cast("str", receipt["path"])).read_text(encoding="utf-8")
-    assert saved_text.endswith("x" * output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES)
-    assert len(saved_text.encode("utf-8")) > output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+    assert saved_text == "x" * stream_size + "\nStderr:\n" + "y" * stream_size
 
     assert explicit["ok"] is True, explicit
     assert (workspace / "explicit.txt").read_text(encoding="utf-8") == "explicit-shell-output"

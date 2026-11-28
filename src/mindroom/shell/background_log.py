@@ -135,18 +135,19 @@ def _open_log_dir(log_dir: Path) -> Iterator[int]:
         os.close(root_fd)
 
 
-def _sweep_old_log_files(dir_fd: int, *, active_names: set[str]) -> None:
+def sweep_generated_output(dir_fd: int, *, name_pattern: re.Pattern[str], active_names: set[str]) -> None:
+    """Expire or evict generated regular files, protecting active and recently written entries."""
     now = time.time()
     age_cutoff = now - _LOG_MAX_AGE_SECONDS
     recent_cutoff = now - _LOG_RECENT_PROTECT_SECONDS
-    evictable_logs: list[tuple[float, str]] = []
+    evictable: list[tuple[float, str]] = []
     protected_count = 0
     try:
         names = os.listdir(dir_fd)
     except OSError:
         return
     for name in names:
-        if not _BACKGROUND_LOG_NAME_RE.match(name):
+        if not name_pattern.fullmatch(name):
             continue
         try:
             st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -162,12 +163,12 @@ def _sweep_old_log_files(dir_fd: int, *, active_names: set[str]) -> None:
             with contextlib.suppress(OSError):
                 os.unlink(name, dir_fd=dir_fd)
         elif mtime >= recent_cutoff:
-            # Protect recently written logs from another concurrent scope in the same workspace.
+            # Protect recently written files from another concurrent scope in the same workspace.
             protected_count += 1
         else:
-            evictable_logs.append((mtime, name))
-    evictable_logs.sort(key=lambda item: item[0], reverse=True)
-    for _, old_name in evictable_logs[max(0, _LOG_MAX_FILES - protected_count) :]:
+            evictable.append((mtime, name))
+    evictable.sort(key=lambda item: item[0], reverse=True)
+    for _, old_name in evictable[max(0, _LOG_MAX_FILES - protected_count) :]:
         with contextlib.suppress(OSError):
             os.unlink(old_name, dir_fd=dir_fd)
 
@@ -191,7 +192,7 @@ def open_background_log(
             os.close(file_fd)
             raise
         active_names = {Path(path).name for path in active_paths if Path(path).parent == log_dir} | {filename}
-        _sweep_old_log_files(dir_fd, active_names=active_names)
+        sweep_generated_output(dir_fd, name_pattern=_BACKGROUND_LOG_NAME_RE, active_names=active_names)
     return BackgroundLogFile(path=log_path, file=stream, max_bytes=policy.max_bytes)
 
 

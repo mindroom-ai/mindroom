@@ -7971,6 +7971,7 @@ depends_on = [
     "mindroom.workers.backend_kinds",
     "mindroom.config.tool_aliases",
     "mindroom.shell.background_scope",
+    "mindroom.shell.output_capture",
     "mindroom.shell.policy",
     "mindroom.workers.models",
     "mindroom.workers.placements",
@@ -13700,6 +13701,7 @@ visibility = [
 path = "mindroom.shell.background_log"
 depends_on = ["mindroom.path_confinement"]
 visibility = [
+    "mindroom.shell.output_capture",
     "mindroom.shell.registry",
     "mindroom.shell.supervisor",
     "mindroom.tools.shell",
@@ -13709,6 +13711,8 @@ visibility = [
 path = "mindroom.shell.output_capture"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
+    "mindroom.path_confinement",
+    "mindroom.shell.background_log",
     "mindroom.shell.output",
     "mindroom.tool_system.output_files",
 ]
@@ -13716,6 +13720,7 @@ visibility = [
     "mindroom.custom_tools.desktop_shell",
     "mindroom.shell.runner",
     "mindroom.shell.supervisor",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tools.shell",
 ]
 

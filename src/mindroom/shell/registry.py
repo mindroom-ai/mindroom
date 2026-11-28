@@ -25,7 +25,7 @@ from mindroom.shell.runner import POST_EXIT_READER_GRACE_SECONDS, ActiveCommand,
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
+    from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination, ShellSpillPolicy
     from mindroom.shell.process import ManagedProcess
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
@@ -154,6 +154,7 @@ def _kill_record(record: BackgroundProcess, *, stop_reason: StopReason | None = 
 class _LaunchOptions(TypedDict, total=False):
     handle: str | None
     output_destination: ShellOutputDestination | None
+    spill_policy: ShellSpillPolicy | None
     spool: SpoolCapture | None
     stdin: int | None
     stderr: int
@@ -235,6 +236,7 @@ class ProcessRegistry:
         if (error := self._reserve_handle(handle)) is not None:
             return error
         output_destination = options.get("output_destination")
+        started: ActiveCommand | ShellRunResult | None = None
         try:
             if immediate:
                 candidate = handle or self._unused_handle()
@@ -250,6 +252,7 @@ class ProcessRegistry:
                 cwd=cwd,
                 tail=tail,
                 output_destination=output_destination,
+                spill_policy=options.get("spill_policy") if not immediate else None,
                 spool=options.get("spool"),
                 stdin=options.get("stdin"),
                 stderr=options.get("stderr", asyncio.subprocess.PIPE),
@@ -269,6 +272,8 @@ class ProcessRegistry:
                 timeout=timeout,
             )
         finally:
+            if isinstance(started, ActiveCommand):
+                started.close_spill()
             if handle is not None:
                 self._reservations.discard(handle)
 
@@ -415,6 +420,7 @@ class ProcessRegistry:
         background_log: BackgroundLogPolicy | None,
         timeout: float | None,  # noqa: ASYNC109
     ) -> ShellRunResult:
+        active.close_spill()
         had_capture = active.output_capture is not None
         handle = requested_handle or self._unused_handle()
         rejection = self._background_rejection(namespace=namespace, handle=handle)

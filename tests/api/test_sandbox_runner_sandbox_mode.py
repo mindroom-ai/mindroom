@@ -16,13 +16,14 @@ from mindroom.api import sandbox_exec
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.constants import resolve_primary_runtime_paths, write_startup_manifest
-from mindroom.tool_system.sandbox_proxy import _sandbox_agent_workspace_output_path
+from mindroom.tool_system.sandbox_proxy import _format_named_worker_result, _sandbox_agent_workspace_output_path
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     named_worker_key,
     serialize_tool_execution_identity,
     worker_root_path,
 )
+from mindroom.workers.models import WorkerSandboxConfig
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
@@ -237,17 +238,18 @@ def test_empty_scratch_sandbox_uses_worker_workspace_without_resolve_agent_runti
     assert not (storage_root / "agents" / "code" / "workspace").exists()
 
     if not stream_io:
-        # Empty scratch disables auto-save so large output is not lost to an ephemeral worker path.
+        # Capped output in empty scratch keeps its inline tail rather than saving to an ephemeral path.
         large_frames = _post_execute(
             client,
             worker_key=worker_key,
             base_dir=None,
-            args=["printf 'x%.0s' {1..2000}"],
+            args=["awk 'BEGIN { for (i=0; i<52000; i++) printf \"x\" }'"],
             kwargs={"worker": "scratch", "sandbox": True},
             sandbox=True,
         )
         assert large_frames[-1]["ok"] is True
-        assert large_frames[-1]["result"] == "x" * 2000
+        assert "Redirect command output" in large_frames[-1]["result"]
+        assert large_frames[-1]["result"].endswith("x" * 51200)
         assert not (expected_workspace / "mindroom_tool_outputs").exists()
 
     refused_frames = _post_execute(
@@ -335,17 +337,19 @@ def test_readonly_mount_dir_keeps_home_writable_skips_hook_and_autosave(
             assert any(frame.get("t") == "exit" and frame.get("code") == 0 for frame in frames)
 
         if not stream_io:
-            # Large output (> 1024 byte threshold) does not crash auto-save on a read-only mount.
+            # Capped output stays inline on a read-only mount, even when the reused worker omits mount flags.
             large_frames = _post_execute(
                 client,
                 worker_key=worker_key,
                 base_dir="agents/code/workspace/scratch/ro_job",
-                args=["printf 'x%.0s' {1..2000}"],
+                args=["awk 'BEGIN { for (i=0; i<52000; i++) printf \"x\" }'"],
                 kwargs={"worker": "ro"},
                 sandbox=True,
             )
             assert large_frames[-1]["ok"] is True
-            assert large_frames[-1]["result"] == "x" * 2000
+            assert "Redirect command output" in large_frames[-1]["result"]
+            assert large_frames[-1]["result"].endswith("x" * 51200)
+            assert not (mounted_dir / "mindroom_tool_outputs").exists()
 
         # Explicit mindroom_output_path on a read-only mount is refused cleanly on both execute and stream_io.
         refused_frames = _post_execute(
@@ -576,6 +580,27 @@ def test_writable_mount_dir_autosaves_and_refuses_explicit_output_path(
     translated = _sandbox_agent_workspace_output_path(saved["path"], mount_dir)
     assert translated == f"{mount_dir}/{saved['path']}"
     assert (agent_workspace / translated).read_text(encoding="utf-8") == "y" * 2000
+
+    spilled = _post_execute(
+        client,
+        worker_key=worker_key,
+        base_dir=base_dir,
+        args=["awk 'BEGIN { for (i=0; i<10001; i++) print \"z\" }'"],
+        kwargs={"worker": "rw", "mount_dir": mount_dir, "tail": 1},
+        sandbox=True,
+    )[-1]
+    assert spilled["ok"] is True
+    inline = spilled["result"]
+    assert isinstance(inline, str)
+    (file,) = (mounted_dir / "mindroom_tool_outputs").glob("shell-spill-*.txt")
+    relative = file.relative_to(mounted_dir).as_posix()
+    assert f"saved to {relative} " in inline
+    assert _format_named_worker_result(
+        inline,
+        header="Worker: rw",
+        admitted_sandbox=WorkerSandboxConfig(mount_dir),
+    ) == ("Worker: rw\n" + inline.replace(f"saved to {relative} ", f"saved to {mount_dir}/{relative} ", 1))
+    assert (agent_workspace / mount_dir / relative).read_bytes() == b"z\n" * 10001
 
     for stream_io in (False, True):
         refused = _post_execute(

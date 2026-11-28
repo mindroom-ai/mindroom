@@ -138,7 +138,9 @@ delete_file("scratch/todo.txt")
 `shell` provides `run_shell_command()`, which accepts a shell command string or a list of argv strings.
 It runs commands only in a worker unless [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults) lets them run in the MindRoom process; otherwise each call there is refused.
 Command strings run through non-login `bash -c`; pass `["bash", "-lc", "command"]` when login-shell startup files are needed, and use a multi-item argv list when exact argument boundaries matter.
-The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at the last 50 KiB; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all of stderr under `Stderr:`.
+The tool returns the last `tail` lines of stdout (default 100), then the last `tail` lines of any stderr under `Stderr:`, each capped at 50 KiB and 10,000 lines; on a non-zero exit, an `Exit code <code>` line comes first, followed by stdout under `Output:` and all retained stderr under `Stderr:`.
+If either hard cap drops foreground output, the inline result also links to the captured stdout and stderr in `mindroom_tool_outputs/` when a writable workspace is available.
+The two streams share the saved-output byte limit, and the result tells you when only the first part was saved.
 If the result is auto-saved, read the saved file rather than relying on the preview for the last lines.
 When `tail` or the cap leaves lines out of a successful result, it starts with a notice for each stream that lost lines, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]` or `[Showing the last 100 of 230 stderr lines. ...]`.
 Blank lines count as lines in a notice and in the tail; output shown whole loses only its trailing newlines, and stderr of only blank lines still gets its `Stderr:` heading.

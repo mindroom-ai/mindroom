@@ -24,7 +24,7 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.background_scope import current_shell_background_scope
-from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.output_capture import ShellOutputDestination, ShellSpillPolicy
 from mindroom.shell.policy import (
     default_run_timeout_seconds,
     normalize_shell_args,
@@ -51,10 +51,10 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
-    current_tool_output_file_request,
+    active_tool_output_file_request,
     current_tool_workdir,
 )
-from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress
+from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress, structured_result_requested
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome
@@ -298,6 +298,25 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
     # Restore MindRoom's captured execution PATH without re-sourcing workspace hooks.
     adjusted_args[command_index] = env_restore + adjusted_args[command_index]
     return adjusted_args
+
+
+def _shell_output_policies(*, allow_spill: bool) -> tuple[ShellOutputDestination | None, ShellSpillPolicy | None]:
+    request = active_tool_output_file_request()
+    if request is None:
+        return None, None
+    policy = request.policy
+    root = str(policy.workspace_root)
+    if request.path is not None:
+        destination = ShellOutputDestination(
+            root,
+            request.path.requested_path,
+            policy.max_bytes,
+            policy.tools_use_workdir,
+        )
+        return destination, None
+    if allow_spill and not structured_result_requested():
+        return None, ShellSpillPolicy(root, policy.max_bytes, policy.tools_use_workdir)
+    return None, None
 
 
 @register_tool_with_metadata(
@@ -623,17 +642,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             subprocess_env = self._command_env(self._process_environ)
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
-            output_request = current_tool_output_file_request()
-            output_destination = (
-                ShellOutputDestination(
-                    workspace_root=str(output_request.policy.workspace_root),
-                    path=output_request.path.requested_path,
-                    max_bytes=output_request.policy.max_bytes,
-                    tools_use_workdir=output_request.policy.tools_use_workdir,
-                )
-                if output_request is not None and output_request.path is not None
-                else None
-            )
+            output_destination, spill_policy = _shell_output_policies(allow_spill=not mount_read_only)
             scope = current_shell_background_scope()
             wait_limit = default_run_timeout_seconds()
             bg_scope = scope if scope is not None and (timeout is None or timeout > wait_limit) else None
@@ -645,6 +654,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 timeout=wait_limit if bg_scope is not None else shell_call_timeout(timeout),
                 on_progress=report_tool_progress,
                 output_destination=output_destination,
+                spill_policy=spill_policy,
                 launch_failure_exits=worker is not None,
             )
             if bg_scope is not None and result.handle is not None:

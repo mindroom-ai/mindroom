@@ -89,7 +89,7 @@ from mindroom.tool_system.runtime_context import (
     worker_progress_pump_scope,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import (
     SyncToolCompletionTracker,
     owned_sync_tool_completion,
@@ -124,7 +124,13 @@ from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.compatibility import worker_health_payload
 from mindroom.workers.in_flight import touch_workers_in_flight
-from mindroom.workers.models import ConfiguredWorkerBackend, WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import (
+    ConfiguredWorkerBackend,
+    WorkerHandle,
+    WorkerReadyProgress,
+    WorkerSandboxConfig,
+    WorkerSpec,
+)
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -932,6 +938,33 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "shell_scope_id": None,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
+
+
+def test_named_worker_rewrites_only_the_spill_hint_in_an_unstructured_writable_mount() -> None:
+    """A failed command also keeps its exit metadata and any occurrence of the path outside the hint."""
+    relative = f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt"
+    absolute = f"/worker workspace/{relative}"
+    notice = f"[Stderr truncated to the last 51200 bytes. First 64 MiB saved to {absolute} (inspect in parts with read_file offset/limit or grep/sed).]"
+    failure = ToolOutcome(
+        content=f"Exit code 3\nStderr:\n{notice}\n{absolute}",
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
+    writable = WorkerSandboxConfig(mount_dir="jobs/build")
+
+    def display(sandbox: WorkerSandboxConfig) -> object:
+        return sandbox_proxy_module._format_named_worker_result(
+            failure,
+            header="Worker: build",
+            admitted_sandbox=sandbox,
+        )
+
+    unchanged = f"Worker: build\n{failure.content}"
+    assert display(writable) == replace(failure, content=unchanged.replace(absolute, f"jobs/build/{relative}", 1))
+    assert display(WorkerSandboxConfig()) == replace(failure, content=unchanged)
+    assert display(replace(writable, mount_read_only=True)) == replace(failure, content=unchanged)
+    with structured_tool_result():
+        assert display(writable) == replace(failure, content=unchanged)
 
 
 def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

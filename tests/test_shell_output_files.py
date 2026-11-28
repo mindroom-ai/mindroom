@@ -6,9 +6,12 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import signal
+import stat
 import sys
 import tempfile
+import time
 from ast import literal_eval
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -18,13 +21,17 @@ import pytest
 
 from mindroom.api import sandbox_runner
 from mindroom.constants import resolve_runtime_paths
-from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell import output_capture
+from mindroom.shell.background_scope import shell_background_scope
+from mindroom.shell.output import ShellOutputBuffer
+from mindroom.shell.output_capture import ShellOutputDestination, ShellOutputSpill, ShellSpillPolicy
 from mindroom.shell.registry import ProcessRegistry
-from mindroom.shell.runner import run_foreground
+from mindroom.shell.runner import ActiveCommand, run_foreground
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
 from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.toolkits import configure_toolkit_functions, toolkit_function
@@ -799,3 +806,311 @@ async def test_failed_shell_auto_save_preserves_is_error_and_saved_output(
     assert (receipt["status"], receipt["auto_saved"]) == ("saved_to_file", True)
     assert literal_eval(outcome.content) == client_tool_result(outcome) == outcome.saved_output
     assert (tmp_path / str(receipt["path"])).read_text().startswith("Exit code 2\nOutput:\n" + "x" * 200)
+
+
+@pytest.mark.parametrize(
+    ("chunks", "max_lines", "max_bytes"),
+    [
+        (["a\nb", "c\n", "", "d"], 2, 32),
+        (["a\nb\n", "\n"], 2, 32),
+        (["é", "🙂", "界"], 4, 6),
+        (["a", "🙂"], 4, 2),
+        (["\ud800", "é", "界"], 4, 3),
+    ],
+)
+def test_would_cap_matches_first_buffer_loss(chunks: list[str], max_lines: int, max_bytes: int) -> None:
+    """Crossing a hard limit is predicted without mutating the buffer; equality is still complete."""
+    buffer = ShellOutputBuffer(max_lines=max_lines, max_bytes=max_bytes)
+    for chunk in chunks[:-1]:
+        assert not buffer.would_cap(chunk)
+        buffer.append(chunk)
+        assert not buffer.capped
+    before = buffer.text()
+    assert buffer.would_cap(chunks[-1])
+    assert not buffer.capped
+    assert buffer.text() == before
+    buffer.append(chunks[-1])
+    assert buffer.capped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stdout_cap", "stderr_cap", "exit_code"),
+    [(True, False, 0), (False, True, 0), (False, True, 3), (True, True, 3)],
+)
+async def test_wrapped_shell_spills_both_streams_once(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+    stdout_cap: bool,
+    stderr_cap: bool,
+    exit_code: int,
+) -> None:
+    """Both local and supervised tools retain heads and tails, and the wrapper does not auto-save the tailed reply."""
+    configure_toolkit_functions(
+        shell_toolkit,
+        output_files=ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=64, tools_use_workdir=stderr_cap),
+    )
+    out_count = 10_001 if stdout_cap else 2
+    err_count = 10_001 if stderr_cap else 2
+    script = (
+        "import sys; "
+        f"sys.stdout.write('out-start\\n' + 'o\\n' * {out_count} + 'out-end'); "
+        f"sys.stderr.write('err-start\\n' + 'e\\n' * {err_count} + 'err-end'); sys.exit({exit_code})"
+    )
+    async with shell_background_scope():
+        result = await _run(
+            shell_toolkit,
+            {"args": [sys.executable, "-c", script], "tail": 10_000, "timeout": None if stderr_cap else 10},
+        )
+    value = result.result
+    if exit_code:
+        assert isinstance(value, ToolOutcome)
+        assert value.is_error
+        assert not value.counts_as_tool_failure
+        assert value.saved_output is None
+        value = value.content
+        assert value.startswith(f"Exit code {exit_code}\n")
+    assert isinstance(value, str)
+    output_dir = tmp_path / "mindroom_tool_outputs"
+    (saved,) = output_dir.iterdir()
+    assert re.fullmatch(r"shell-spill-[0-9a-f]{32}\.txt", saved.name)
+    assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+    shown_path = saved if stderr_cap else saved.relative_to(tmp_path)
+    assert (
+        value.count(f"Full output saved to {shown_path} (inspect in parts with read_file offset/limit or grep/sed).")
+        == 1
+    )
+    assert "Redirect command output" not in value
+    assert (
+        saved.read_text()
+        == "out-start\n" + "o\n" * out_count + "out-end\nStderr:\n" + "err-start\n" + "e\n" * err_count + "err-end"
+    )
+
+
+_LARGE_OUTPUT = "print('x' * 52000, flush=True)"
+_SLEEP_AFTER_OUTPUT = f"import time; {_LARGE_OUTPUT}; time.sleep(60)"
+
+
+async def _run_with_spill(root: Path, script: str = _LARGE_OUTPUT, *, timeout_seconds: float = 10) -> ShellRunResult:
+    return await run_foreground(
+        argv=[sys.executable, "-c", script],
+        env={},
+        cwd=None,
+        tail=1,
+        timeout=timeout_seconds,
+        spill_policy=ShellSpillPolicy(str(root), 100_000),
+    )
+
+
+@pytest.mark.asyncio
+async def test_tail_only_does_not_allocate_a_spill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child can fill the hard line limit exactly without a spool, even when the response shows only one line."""
+
+    def unexpected_spool(**_kwargs: object) -> BinaryIO:
+        pytest.fail("An uncapped buffer allocated a tempfile")
+
+    monkeypatch.setattr("mindroom.shell.output.tempfile.TemporaryFile", unexpected_spool)
+    result = await _run_with_spill(tmp_path, "print('a\\n' * 9999 + 'last')")
+    assert result.message == "[Showing the last 1 of 10000 lines. Pass a larger tail, or narrow the command.]\nlast"
+    assert not result.output_file_handled
+    assert not (tmp_path / "mindroom_tool_outputs").exists()
+
+
+@pytest.mark.asyncio
+async def test_structured_shell_skips_spill_even_when_hard_capped(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+    """The structured request keeps its original shell text and exit metadata through either execution route."""
+    with structured_tool_result() as metadata:
+        result = await _run(shell_toolkit, {"args": [sys.executable, "-c", "print('x' * 52000)"], "tail": 1})
+    assert isinstance(result.result, str)
+    assert "Redirect command output" in result.result
+    assert metadata == {"exit_code": 0}
+    assert not (tmp_path / "mindroom_tool_outputs").exists()
+
+
+def test_spill_cap_is_combined_and_does_not_split_utf8(tmp_path: Path) -> None:
+    """Seed both streams before the losing append, budget their raw bytes together, stop at a UTF-8 boundary."""
+    stdout, stderr = ShellOutputBuffer(max_bytes=4), ShellOutputBuffer(max_bytes=4)
+    spill = ShellOutputSpill(ShellSpillPolicy(str(tmp_path), 9), stdout, stderr)
+    try:
+        for is_stderr, chunk in [(False, "é\n"), (True, "err"), (False, "x🙂"), (True, "!"), (False, "!")]:
+            spill.append(chunk, is_stderr=is_stderr)
+            (stderr if is_stderr else stdout).append(chunk)
+        hint = spill.publish()
+        (saved,) = (tmp_path / "mindroom_tool_outputs").iterdir()
+        assert hint is not None
+        assert hint.startswith(f"First 9 bytes saved to mindroom_tool_outputs/{saved.name}")
+        assert saved.read_text() == "é\nx\nStderr:\nerr\n[Spill truncated at 9 bytes; command output continued.]\n"
+    finally:
+        spill.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["root_link", "output_dir_link", "disk_write", "spool_open"])
+async def test_spill_errors_fall_back_without_writing_outside_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Refuse linked roots/destinations and clean failed writes without changing the command outcome."""
+    root, outside = tmp_path / "workspace", tmp_path / "outside"
+    outside.mkdir()
+    if failure == "root_link":
+        root.symlink_to(outside, target_is_directory=True)
+    else:
+        root.mkdir()
+    if failure == "output_dir_link":
+        (root / "mindroom_tool_outputs").symlink_to(outside, target_is_directory=True)
+
+    def disk_error() -> OSError:
+        return OSError("Simulated spill I/O failure")
+
+    if failure == "disk_write":
+
+        def fail_write(_capture: object, target: BinaryIO, _trailer: str) -> None:
+            target.write(b"incomplete")
+            raise disk_error()
+
+        monkeypatch.setattr(output_capture, "_write_spill", fail_write)
+    if failure == "spool_open":
+
+        def fail_open(**_kwargs: object) -> BinaryIO:
+            raise disk_error()
+
+        monkeypatch.setattr("mindroom.shell.output.tempfile.TemporaryFile", fail_open)
+
+    result = await _run_with_spill(root)
+    assert result.return_code == 0
+    assert not result.output_file_handled
+    assert "Redirect command output" in result.message
+    assert not list(outside.iterdir())
+    assert not list((root / "mindroom_tool_outputs").glob("shell-spill-*.txt"))
+
+
+@pytest.mark.asyncio
+async def test_spill_sweep_limits_only_generated_regular_files(tmp_path: Path) -> None:
+    """Expire old spills, keep at most 64 otherwise, and protect new files and unrelated entries."""
+    output_dir = tmp_path / "mindroom_tool_outputs"
+    output_dir.mkdir()
+    now = time.time()
+
+    def make(name: str, age: int) -> Path:
+        path = output_dir / name
+        path.write_text("previous")
+        os.utime(path, (now - age, now - age))
+        return path
+
+    expired = make(f"shell-spill-{0:032x}.txt", 25 * 3600)
+    oldest = make(f"shell-spill-{1:032x}.txt", 3600)
+    for index in range(2, 66):
+        make(f"shell-spill-{index:032x}.txt", 600)
+    recent = make(f"shell-spill-{66:032x}.txt", 30)
+    custom = make(f"shell-spill-{67:032x}.txt.backup", 25 * 3600)
+    linked = output_dir / f"shell-spill-{68:032x}.txt"
+    linked.symlink_to(custom)
+
+    result = await _run_with_spill(tmp_path)
+    assert result.output_file_handled
+    assert not expired.exists()
+    assert not oldest.exists()
+    assert recent.read_text() == custom.read_text() == "previous"
+    assert linked.is_symlink()
+    assert len([path for path in output_dir.glob("shell-spill-*.txt") if not path.is_symlink()]) == 64
+
+
+@pytest.mark.asyncio
+async def test_inline_timeout_publishes_capped_partial_spill(tmp_path: Path) -> None:
+    """An inline stop preserves output already received, unlike an explicit strict redirect."""
+    result = await _run_with_spill(tmp_path, _SLEEP_AFTER_OUTPUT, timeout_seconds=1)
+    assert result.timed_out
+    assert result.output_file_handled
+    assert result.message.startswith("Stopped after 1s.")
+    (saved,) = (tmp_path / "mindroom_tool_outputs").iterdir()
+    assert saved.read_bytes() == b"x" * 52000 + b"\n"
+
+
+@pytest.fixture
+def spill_files(monkeypatch: pytest.MonkeyPatch) -> tuple[list[BinaryIO], asyncio.Event]:
+    """Observe real spool allocation and release without relying on a subprocess startup delay."""
+    temporary_file = tempfile.TemporaryFile
+    files: list[BinaryIO] = []
+    opened = asyncio.Event()
+
+    def observe(*, dir: str | None) -> BinaryIO:  # noqa: A002
+        stream = temporary_file(dir=dir)
+        files.append(stream)
+        if len(files) == 2:
+            opened.set()
+        return stream
+
+    monkeypatch.setattr("mindroom.shell.output.tempfile.TemporaryFile", observe)
+    return files, opened
+
+
+@pytest.mark.asyncio
+async def test_cancel_releases_active_spill_without_publication(
+    tmp_path: Path,
+    spill_files: tuple[list[BinaryIO], asyncio.Event],
+) -> None:
+    """Cancel after both files open and check that the run publishes nothing and closes both."""
+    files, opened = spill_files
+    task = asyncio.create_task(_run_with_spill(tmp_path, _SLEEP_AFTER_OUTPUT, timeout_seconds=30))
+    try:
+        await asyncio.wait_for(opened.wait(), timeout=5)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert len(files) == 2
+    assert all(file.closed for file in files)
+    assert not (tmp_path / "mindroom_tool_outputs").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cap_before_adoption", [False, True])
+async def test_adoption_disables_spill_even_if_not_yet_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spill_files: tuple[list[BinaryIO], asyncio.Event],
+    cap_before_adoption: bool,
+) -> None:
+    """Readers continue after adoption but can neither keep nor initiate anonymous spill files."""
+    files, opened = spill_files
+
+    async def adopt(_command: ActiveCommand, **_kwargs: object) -> bool:
+        if cap_before_adoption:
+            await asyncio.wait_for(opened.wait(), timeout=5)
+        return True
+
+    monkeypatch.setattr(ActiveCommand, "wait_or_timeout", adopt)
+    prefix = "print('x' * 52000, flush=True)\n" if cap_before_adoption else ""
+    script = (
+        "import pathlib, time\n"
+        + prefix
+        + "while not pathlib.Path('release').exists(): time.sleep(0.01)\nprint('y' * 52000, flush=True)"
+    )
+    registry = ProcessRegistry()
+    try:
+        result = await registry.run_or_background(
+            namespace="spill",
+            argv=[sys.executable, "-c", script],
+            env={},
+            cwd=str(tmp_path),
+            tail=1,
+            timeout=1,
+            spill_policy=ShellSpillPolicy(str(tmp_path), 200_000),
+        )
+        assert result.handle is not None
+        assert not result.output_file_handled
+        assert len(files) == 2 * cap_before_adoption
+        assert all(file.closed for file in files)
+        (tmp_path / "release").touch()
+        record = registry.get_process("spill", result.handle)
+        assert record is not None
+        assert record.monitor_task is not None
+        await asyncio.wait_for(asyncio.shield(record.monitor_task), timeout=5)
+        assert record.stdout_buf.capped
+        assert "y" in record.stdout_buf.text()
+        assert len(files) == 2 * cap_before_adoption
+        assert not (tmp_path / "mindroom_tool_outputs").exists()
+    finally:
+        registry.kill_all()

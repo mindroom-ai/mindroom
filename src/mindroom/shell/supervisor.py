@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.logging_config import get_logger
 from mindroom.shell.background_log import BackgroundLogPolicy
-from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.output_capture import ShellOutputDestination, ShellSpillPolicy
 from mindroom.shell.registry import ProcessRegistry, ProcessStatus, SignalResult
 from mindroom.shell.runner import ShellRunResult, run_foreground
 
@@ -123,6 +123,7 @@ def _parse_launch_payload(payload: dict[str, object]) -> tuple[dict[str, Any], s
         "cwd": str(payload["cwd"]) if payload.get("cwd") is not None else None,
         "tail": int(payload["tail"]),  # ty: ignore[invalid-argument-type]
         "output_destination": ShellOutputDestination.from_payload(payload.get("output_destination")),
+        "spill_policy": ShellSpillPolicy.from_payload(payload.get("spill_policy")),
         "launch_failure_exits": payload.get("launch_failure_exits") is True,
     }
     return common, handle, kill_group
@@ -344,6 +345,7 @@ async def run_command_via_supervisor(
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
+    spill_policy: ShellSpillPolicy | None = None,
     background_log: BackgroundLogPolicy | None = None,
     kill_group_after_exit: bool = False,
     launch_failure_exits: bool = False,
@@ -366,6 +368,7 @@ async def run_command_via_supervisor(
             "handle": handle,
             "max_runtime_seconds": max_runtime_seconds,
             "output_destination": asdict(output_destination) if output_destination is not None else None,
+            "spill_policy": asdict(spill_policy) if spill_policy is not None else None,
             "background_log": asdict(background_log) if background_log is not None else None,
             "progress": True if on_progress is not None else None,
         },

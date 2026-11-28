@@ -26,13 +26,14 @@ from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTE
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.background_scope import current_shell_background_scope
+from mindroom.shell.output_capture import rewrite_shell_spill_hint
 from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
-from mindroom.tool_system.progress import report_tool_metadata
+from mindroom.tool_system.progress import report_tool_metadata, structured_result_requested
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -897,18 +898,25 @@ def _format_named_worker_result(
     header: str,
     admitted_sandbox: WorkerSandboxConfig | None,
 ) -> object:
-    """Prepend the named-worker header and rewrite sandboxed saved-output receipt paths."""
+    """Prepend the named-worker header and rewrite sandboxed saved-output paths."""
+    if isinstance(result, str) or (isinstance(result, ToolOutcome) and result.saved_output is None):
+        content = result if isinstance(result, str) else result.content
+        if (
+            admitted_sandbox is not None
+            and admitted_sandbox.mount_dir is not None
+            and not admitted_sandbox.mount_read_only
+            and not structured_result_requested()
+        ):
+            content = rewrite_shell_spill_hint(content, admitted_sandbox.mount_dir)
+        shown = f"{header}\n{content}"
+        return shown if isinstance(result, str) else replace(result, content=shown)
     if isinstance(result, ToolOutcome):
-        if result.saved_output is None:
-            return replace(result, content=f"{header}\n{result.content}")
         updated = _format_named_worker_result(result.saved_output, header=header, admitted_sandbox=admitted_sandbox)
         return (
             replace(result, content=str(updated), saved_output=updated)
             if isinstance(updated, dict) and updated is not result.saved_output
             else result
         )
-    if isinstance(result, str):
-        return f"{header}\n{result}"
     # The runner can save its shell result before it gets here. The preview has the same exit line,
     # and a sandboxed mount_dir saves relative to that mount rather than the agent workspace root.
     if (
