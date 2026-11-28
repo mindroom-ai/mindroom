@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.agent_cli.session import CliTurnOwner
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv
+    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import (
@@ -177,6 +178,7 @@ class LiveTurnTools(TurnToolBridge):
         delegation_depth: int,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
         sandbox_only: bool = False,
+        run_child: ChildResponseRunner | None = None,
     ) -> None:
         if owner.execution_identity != catalog.runtime_context.execution_identity:
             msg = "CLI catalog execution identity does not match its turn owner"
@@ -196,6 +198,7 @@ class LiveTurnTools(TurnToolBridge):
         self._media: dict[str, list[ToolValue]] = {}
         self._delegation_depth = delegation_depth
         self._refresh_scheduler = refresh_scheduler
+        self._run_child = run_child
         self._outer = asyncio.Lock()
         self._delegation = asyncio.Lock()
         self._admission = asyncio.Lock()
@@ -861,6 +864,9 @@ class LiveTurnTools(TurnToolBridge):
         parent: str,
         authorize: Callable[[], Awaitable[None]],
     ) -> AsyncIterator[AgentToolCallStep]:
+        if self._run_child is None:
+            msg = "CLI delegation requires a child response runner"
+            raise RuntimeError(msg)
         approval_calls = None
         started = False
         child_toolkits: dict[str, str | None] = {}
@@ -886,6 +892,7 @@ class LiveTurnTools(TurnToolBridge):
                         refresh_scheduler=self._refresh_scheduler,
                         approval_calls=approval_calls,
                         on_event=on_child_event,
+                        run_child=self._run_child,
                     )
             if not isinstance(result, PausedAttempt):
                 yield AgentToolCallStep("completed", binding.key, result.call)

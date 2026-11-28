@@ -26,6 +26,7 @@ from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.approval.transport import ApprovalMatrixTransport
 from mindroom.attachments.storage import wait_for_attachment_cleanup_tasks
+from mindroom.automations.builtins import resolve_automation_definition
 from mindroom.automations.runner import AutomationRunner
 from mindroom.background_tasks import (
     SupervisedLoop,
@@ -418,7 +419,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
-            definition_provider=lambda name: self.hook_registry.automations.get(name),
+            definition_provider=lambda name: resolve_automation_definition(name, self.hook_registry.automations),
             agent_reply_memberships=self.agent_reply_memberships,
         )
         self._budgets = BudgetMonitor(runtime_paths=self.runtime_paths, config_provider=lambda: self.config)

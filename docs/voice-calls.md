@@ -68,6 +68,7 @@ Configuration loading fails with one of these errors when references are wrong:
 | `model` | yes | OpenAI realtime speech-to-speech model ID. |
 | `credentials_service` | yes | Named credential service holding the OpenAI API key. |
 | `voice` | yes | Realtime voice preset. |
+| `speed` | no | Initial speaking rate multiplier (`0.25` to `1.5`; default `1.0`). |
 
 ### Live profile fields
 
@@ -76,7 +77,8 @@ Configuration loading fails with one of these errors when references are wrong:
 | `backend` | yes | `live` |
 | `model` | yes | OpenAI Live speech model ID, independent of `agent_model`. |
 | `credentials_service` | yes | Named credential service holding the OpenAI API key; Live needs no separate STT or TTS credentials. |
-| `voice` | yes | Live voice preset. |
+| `voice` | yes | Live voice preset name, or a custom prompt-to-voice reference (`{id: "voice_..."}`). |
+| `speed` | no | Initial speaking rate multiplier (`0.25` to `1.5`; default `1.0`), applied as a standing pacing instruction. |
 | `agent_model` | no | Name of a top-level `models` entry used for delegated agent turns; omitted keeps normal room and agent model resolution. |
 
 ### Cascaded profile fields
@@ -87,6 +89,7 @@ Configuration loading fails with one of these errors when references are wrong:
 | `model` | no | Name of a top-level `models` entry for call turns; it takes precedence over room and agent models, and omitting it keeps normal model resolution. |
 | `stt` | yes | Speech-to-text service. |
 | `tts` | yes | Text-to-speech service. |
+| `speed` | no | Initial speaking rate multiplier (`0.25` to `4.0`, or `0.25` to `1.5` for `gpt-realtime` TTS; default `1.0`); do not also set `tts.extra_kwargs.speed`. |
 
 Each speech service (`stt` and `tts`) has these fields:
 
@@ -101,8 +104,16 @@ Each speech service (`stt` and `tts`) has these fields:
 
 `openai` services require `credentials_service` or `api_key`.
 `openai_compatible` services require `host` and may omit credentials, in which case MindRoom sends a non-secret placeholder key.
-STT services must expose `/v1/audio/transcriptions` and TTS services `/v1/audio/speech`, except `gpt-realtime` TTS models, which speak through the OpenAI Realtime API and take only `voice` in `extra_kwargs`.
+STT services must expose `/v1/audio/transcriptions` and TTS services `/v1/audio/speech`, except `gpt-realtime` TTS models, which speak through the OpenAI Realtime API and take only `voice` and `speed` in `extra_kwargs`.
 The two legs may use the same credential service or different ones.
+
+### Speaking rate
+
+Every call profile accepts an optional `speed` multiplier for the call's starting speaking rate.
+During a call, the agent also gets a call-only `set_speaking_rate` tool so the caller can ask it to speak faster, slower, or return to normal speed (`1.0`) without restarting the call.
+`realtime` and `cascaded` calls apply the new rate directly to the speech model for subsequent turns or segments (`0.25` to `1.5` on `realtime` and `gpt-realtime` TTS, or `0.25` to `4.0` on `/v1/audio/speech` TTS).
+`live` calls have no numeric speed parameter in OpenAI's Live API, so MindRoom translates `speed` (`0.25` to `1.5`) into a standing pacing instruction at startup, updates it mid-call via `session.instructions.append`, and re-applies mid-call adjustments after reconnects.
+On `live` profiles, `voice` can also be a custom voice object (`voice: {id: "voice_..."}`) instead of a built-in voice preset name.
 
 ## Choosing a backend
 

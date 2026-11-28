@@ -21,7 +21,6 @@ from unittest.mock import patch
 from mindroom.history import storage as history_storage
 from mindroom.llm import messages, runs
 from mindroom.session_storage import (
-    agent_storage,
     legacy_agno2_runs,
     legacy_compaction_state,
     preflight,
@@ -91,11 +90,11 @@ def _time_module(determinism: Determinism) -> SimpleNamespace:
 
 # Modules that call ``uuid4`` by that name, each with its own counter, by tag. Tag 2 counted the requirement ids
 # ``mindroom.llm.runs`` minted, which are no longer stored; the other tags keep the ids the recordings hold.
-_UUID_MODULES: dict[int, ModuleType] = {1: messages, 3: agent_storage, 4: preflight}
+_UUID_MODULES: dict[int, ModuleType] = {1: messages, 3: store, 4: preflight}
 # Modules that call ``time()`` imported from ``time``.
 _TIME_FUNCTION_MODULES: tuple[ModuleType, ...] = (messages, runs, store, summary_rows, types)
 # Modules that call ``time.time()`` on the imported module.
-_TIME_MODULE_MODULES: tuple[ModuleType, ...] = (agent_storage, legacy_compaction_state, legacy_agno2_runs)
+_TIME_MODULE_MODULES: tuple[ModuleType, ...] = (legacy_compaction_state, legacy_agno2_runs)
 # Modules that call ``datetime.now``.
 _DATETIME_MODULES: tuple[ModuleType, ...] = (history_storage,)
 

@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 
 import mindroom.tools  # noqa: F401  # register the built-in factories
+from mindroom.config.authored_overrides import AUTHORED_OVERRIDE_INHERIT
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 
 
@@ -96,7 +97,7 @@ def test_media_model_inherit_preserves_saved_or_current_default(
         "fal",
         runtime_paths,
         credential_overrides=credentials,
-        tool_config_overrides={"model": _AUTHORED_OVERRIDE_INHERIT},
+        tool_config_overrides={"model": AUTHORED_OVERRIDE_INHERIT},
         runs_in_worker=False,
         worker_target=None,
         tools=builtin_tool_registry(),

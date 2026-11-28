@@ -1,10 +1,12 @@
-"""History compaction types."""
+"""History compaction types and session metadata."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, cast
+
+from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -14,6 +16,9 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import ConversationSession
 
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
+
+# The only field of the owner's history state, left out of the stored value at its default.
+_FORCE_COMPACTION = "force_compact_before_next_run"
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
@@ -151,6 +156,48 @@ class HistoryScopeState:
     def compaction_mode(self) -> CompactionMode:
         """Return how a compaction of this scope is reported: manual when requested, else automatic."""
         return "manual" if self.force_compact_before_next_run else "auto"
+
+
+def history_scope_state_from_metadata(metadata: dict[str, Any] | None) -> HistoryScopeState:
+    """Return the owner scope's compaction state from session metadata."""
+    return HistoryScopeState(force_compact_before_next_run=_history_state(metadata).get(_FORCE_COMPACTION) is True)
+
+
+def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the owner's stored history state from session ``metadata``, or an empty one."""
+    raw_value = metadata.get(MINDROOM_HISTORY_METADATA_KEY) if isinstance(metadata, dict) else None
+    return raw_value if isinstance(raw_value, dict) else {}
+
+
+# LEGACY_COMPAT: Seen ids earlier releases copied into the owner's history state.
+# Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, which layout version 7
+# fills from the older per-scope entry (``session_storage/legacy_scope_metadata.py``): the destructive compactor merged
+# compacted runs' ids into it, and team turns merged the ids each one consumed, which its stored run also holds.
+# Last legacy release: v2026.10.760; replacement: v2026.10.761, where each team turn's stored run is the only record of
+# the events it consumed.
+# Handling: Nothing reads the ids; seen ids come only from the replayable runs and the summary rows. The force flag's
+# writer keeps the field beside the flag, so a row holds it as inert data.
+# Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
+# tests/test_history_scope_state.py::test_an_edit_cut_returns_the_messages_only_the_removed_run_read, and
+# tests/test_history_scope_state.py::test_the_force_flag_is_set_and_cleared_beside_the_seen_ids.
+def with_force_compaction_flag(metadata: dict[str, Any] | None, *, forced: bool) -> dict[str, Any]:
+    """Return session ``metadata`` with the owner's force flag set to ``forced``; ``metadata`` is left alone.
+
+    A false flag is left out, and an empty state removes the key.
+    """
+    state = {**_history_state(metadata), _FORCE_COMPACTION: forced}
+    state = {name: stored for name, stored in state.items() if stored}
+    session_metadata = dict(metadata or {})
+    if state:
+        session_metadata[MINDROOM_HISTORY_METADATA_KEY] = state
+    else:
+        session_metadata.pop(MINDROOM_HISTORY_METADATA_KEY, None)
+    return session_metadata
+
+
+def with_force_compaction(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return session ``metadata`` asking its owner to compact before its next run; ``metadata`` itself is left alone."""
+    return with_force_compaction_flag(metadata, forced=True)
 
 
 @dataclass(frozen=True)

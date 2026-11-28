@@ -3,7 +3,7 @@
 Each entry is a partial `EgressService` payload keyed by preset name.
 `EgressService` merges the selected entry into the authored service before field validation,
 so the validated config always carries the expanded rules and downstream code needs no preset awareness.
-This module is pure data and must not import from `mindroom.config`.
+This module is pure data and imports nothing from MindRoom.
 """
 
 from __future__ import annotations

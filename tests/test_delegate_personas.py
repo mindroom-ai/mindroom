@@ -31,6 +31,7 @@ from tests.delegation_helpers import (
     _saved_approval_calls,
     approval_executor,
     authored_prompts,
+    default_delegation_executor,
     native_delegation_config,
     offered_tools,
     respond,
@@ -126,6 +127,7 @@ class _Harness:
             execution_identity=self.identity,
             workspace_root=_workspace(self.paths.storage_root),
             delegation_depth=delegation_depth,
+            delegation_executor=default_delegation_executor(),
         )
 
     async def run(self, call: Awaitable[str], config: Config | None = None) -> str:

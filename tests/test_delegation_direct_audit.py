@@ -40,7 +40,7 @@ from mindroom.tool_system.worker_routing import (
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, toolkit
 from tests.agent_tool_helpers import toolkit_offers
-from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, default_delegation_executor
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls
 from tests.fakes.scripted_model import tool_call as scripted_call
 from tests.test_delegate_tools import _make_config
@@ -80,6 +80,7 @@ def _tools(tmp_path: Path) -> tuple[DelegateTools, object, object]:
             config,
             agent_workspace_root_path(runtime_paths.storage_root, "leader"),
             execution_identity=identity,
+            delegation_executor=default_delegation_executor(),
         ),
         config,
         runtime_paths,

@@ -6,7 +6,6 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.ai import run_delegated_child_response
 from mindroom.delegation.lifecycle import child_run_context, finish_child_turn, reserve_child_turn, start_child_turn
 from mindroom.delegation.sessions import subagent_liveness
 from mindroom.failure_text import failure_text
@@ -17,7 +16,7 @@ from mindroom.response_turn import ResponsePausedForApproval
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild
+    from mindroom.delegation.state import DelegationChild, DirectChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -41,6 +40,7 @@ async def run_direct_child_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    run_child: DirectChildResponseRunner,
     approval_config: Config | None = None,
 ) -> _DirectChildResult:
     """Reserve, run, and settle one child turn.
@@ -63,7 +63,7 @@ async def run_direct_child_turn(
                 caller_execution_identity=owner,
             )
             async with child_run_context(child, config=config, runtime_paths=runtime_paths):
-                response = await run_delegated_child_response(
+                response = await run_child(
                     child,
                     prompt=child.task,
                     config=config,

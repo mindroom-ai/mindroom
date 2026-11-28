@@ -10,11 +10,9 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools import delegate as delegate_module
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation import direct as direct_module
 from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
-from mindroom.delegation.state import DelegationChild, DelegationState
+from mindroom.delegation.state import DelegationChild, DelegationExecutor, DelegationState
 from mindroom.delegation.targets import resolve_fresh_target
 from mindroom.delegation.workers import child_placement, dedicated_worker_refusal
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -25,7 +23,13 @@ from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_work
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.access_schema_support import with_responder_access
 from tests.agent_tool_helpers import toolkit_offers
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, native_delegation_config, respond
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    default_delegation_executor,
+    native_delegation_config,
+    respond,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
@@ -85,13 +89,19 @@ def _identity(agent_name: str = "leader") -> ToolExecutionIdentity:
     return ToolExecutionIdentity("matrix", agent_name, _REQUESTER, "!room:example.org", "$thread", "$thread", "parent")
 
 
-def _tools(config: Config, paths: RuntimePaths) -> DelegateTools:
+def _tools(
+    config: Config,
+    paths: RuntimePaths,
+    *,
+    delegation_executor: DelegationExecutor | None = None,
+) -> DelegateTools:
     return DelegateTools(
         agent_name="leader",
         runtime_paths=paths,
         config=config,
         workspace_root=agent_workspace_root_path(paths.storage_root, "leader"),
         execution_identity=_identity(),
+        delegation_executor=delegation_executor or default_delegation_executor(),
     )
 
 
@@ -412,7 +422,7 @@ async def test_a_native_child_calls_its_tools_placed_in_its_own_worker(
 
 
 @pytest.mark.asyncio
-async def test_a_direct_child_runs_placed_in_its_own_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_direct_child_runs_placed_in_its_own_worker(tmp_path: Path) -> None:
     """The direct adapter forwards the choice and runs the child placed in its worker."""
     paths = _paths(tmp_path, _DOCKER)
     config = _config(paths)
@@ -422,9 +432,13 @@ async def test_a_direct_child_runs_placed_in_its_own_worker(tmp_path: Path, monk
         seen.append(placement_for_session(child.session_id))
         return "done"
 
-    monkeypatch.setattr(direct_module, "run_delegated_child_response", run_child)
+    executor = DelegationExecutor(run_child=run_child, run_direct_child=run_child)
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_identity())):
-        result = await _tools(config, paths).run_subagent(agent_name="code", task="Probe", dedicated_worker=True)
+        result = await _tools(config, paths, delegation_executor=executor).run_subagent(
+            agent_name="code",
+            task="Probe",
+            dedicated_worker=True,
+        )
 
     assert result.startswith("done")
     [placement] = seen
@@ -433,7 +447,7 @@ async def test_a_direct_child_runs_placed_in_its_own_worker(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_a_background_child_records_its_choice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_background_child_records_its_choice(tmp_path: Path) -> None:
     """A managed background call forwards the choice into the child its job runs."""
     paths = _paths(tmp_path, _KUBERNETES)
     config = _config(paths)
@@ -443,9 +457,9 @@ async def test_a_background_child_records_its_choice(tmp_path: Path, monkeypatch
         jobs.append(child)
         return MagicMock()
 
-    monkeypatch.setattr(delegate_module, "delegation_call_job", delegation_call_job)
+    executor = replace(default_delegation_executor(), build_job=delegation_call_job)
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_identity())):
-        await _tools(config, paths).managed_job(
+        await _tools(config, paths, delegation_executor=executor).managed_job(
             "run_subagent",
             {"agent_name": "code", "task": "Probe", "dedicated_worker": True, "resource_profile": "small"},
             job_id="job-1",

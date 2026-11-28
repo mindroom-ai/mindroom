@@ -21,11 +21,11 @@ from mindroom.api import config_lifecycle, github_requests
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import client_session_store
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
-from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import manager as credentials_manager
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.http_validation import validation_error_response
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError

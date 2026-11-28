@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from mindroom import constants
-    from mindroom.delegation.state import SubagentPersona
+    from mindroom.delegation.state import DelegationExecutor, SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.runtime_resolution import ResolvedAgentRuntime
     from mindroom.tool_system.agent_tools import AgentTools
@@ -54,6 +54,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
     deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
     calls_as_jobs: bool = False,
     worker_sandbox: WorkerSandboxConfig | None = None,
+    delegation_executor: DelegationExecutor | None = None,
 ) -> Toolkit | None:
     """Build one of the toolkits ``agent_tools`` offers the agent, where ``placement`` runs it.
 
@@ -89,7 +90,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
 
             toolkit = KnowledgeGraphTools(agent_name, config, runtime_paths, execution_identity)
         case "delegate":
-            # Imported lazily to avoid a cycle: delegate -> ai -> agents -> toolkit_builder -> delegate.
+            # Like the other optional toolkits, load delegation only when this build requests it.
             from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
 
             toolkit = DelegateTools(
@@ -102,6 +103,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
                 workspace_root=workspace_root,
                 persona=persona,
                 calls_as_jobs=calls_as_jobs,
+                delegation_executor=delegation_executor,
             )
         case "self_config":
             from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415

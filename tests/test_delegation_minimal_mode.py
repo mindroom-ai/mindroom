@@ -40,7 +40,7 @@ from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, default_delegation_executor
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
@@ -273,6 +273,7 @@ async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
         config,
         _workspace(tmp_path, "leader"),
         execution_identity=_identity(),
+        delegation_executor=default_delegation_executor(),
     )
     leader = ScriptedModel([])
     ScriptedAgents({"leader": leader, "helper": ScriptedModel([]), "plain": ScriptedModel([])}).install(monkeypatch)
@@ -338,6 +339,7 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
         config,
         _workspace(tmp_path, "leader"),
         execution_identity=identity,
+        delegation_executor=default_delegation_executor(),
     )
 
     with tool_runtime_context(live):
@@ -421,7 +423,14 @@ async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
     leader = ScriptedModel([])
     install_scripted_shell(monkeypatch, run_shell_command)
     ScriptedAgents({"leader": leader, "helper": child}).install(monkeypatch)
-    toolkit = DelegateTools("leader", paths, snapshot, _workspace(tmp_path, "leader"), execution_identity=identity)
+    toolkit = DelegateTools(
+        "leader",
+        paths,
+        snapshot,
+        _workspace(tmp_path, "leader"),
+        execution_identity=identity,
+        delegation_executor=default_delegation_executor(),
+    )
 
     with tool_runtime_context(live):
         if caller in {"approval_overlay", "stale_approval_overlay"}:
@@ -455,6 +464,7 @@ async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
                 runtime_paths=paths,
                 refresh_scheduler=None,
                 approval_config=overlay,
+                run_child=ai.run_delegated_child_response,
             )
             result = completed.text
         else:
@@ -594,7 +604,14 @@ async def _run_minimal_turn_through_a_reload(
         with tool_runtime_context(replace(live, agent_name="helper")):
             run.result = (await ai.ai_response(turn, paths, config)).text
         return run
-    toolkit = DelegateTools("leader", paths, config, _workspace(tmp_path, "leader"), execution_identity=_identity())
+    toolkit = DelegateTools(
+        "leader",
+        paths,
+        config,
+        _workspace(tmp_path, "leader"),
+        execution_identity=_identity(),
+        delegation_executor=default_delegation_executor(),
+    )
     with tool_runtime_context(live):
         if via == "job":
             run.result = await _run_subagent_job(tmp_path, config, paths, toolkit._caller_identity())
@@ -971,6 +988,7 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
         config,
         _workspace(tmp_path, "leader"),
         execution_identity=_identity(),
+        delegation_executor=default_delegation_executor(),
     )
 
     with tool_runtime_context(_live_context(config, paths)):
@@ -1029,6 +1047,7 @@ async def test_minimal_child_auto_backgrounds_untimed_bash_and_cleans_up_on_fini
         config,
         _workspace(tmp_path, "leader"),
         execution_identity=_identity(),
+        delegation_executor=default_delegation_executor(),
     )
 
     with tool_runtime_context(_live_context(config, paths)):

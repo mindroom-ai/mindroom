@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict, Unpac
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
+from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_call_ids
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
@@ -41,6 +42,7 @@ from mindroom.delegation.state import (
     DELEGATION_FUNCTIONS,
     DELEGATION_STATE_KEY,
     DelegationChild,
+    DelegationExecutor,
     DelegationPendingTool,
     DelegationState,
     child_call_id,
@@ -303,9 +305,6 @@ async def _execute_child(
     prompt: str | None,
 ) -> _ChildOutcome:
     """Start a fresh envelope or resume the exact stored child under its own scope."""
-    # mindroom.agents imports this module, so the child's agent is created through a deferred import.
-    from mindroom.agents import create_agent  # noqa: PLC0415
-
     identity = child_execution_identity(child)
     context = get_tool_runtime_context()
     if context is None or context.requester_id != identity.requester_id or context.room_id != identity.room_id:
@@ -406,6 +405,7 @@ async def _execute_child(
         required_tool_names=required_tool_names,
         persona=child.persona,
         worker_sandbox=child.worker_sandbox,
+        delegation_executor=DelegationExecutor(run_child=run_child, build_job=delegation_call_job),
     )
     toolkit_owners = tool_owners_by_agent(build)
     validate_approval_tool_owners(toolkit_owners, approved_calls, pending_approval_requirements(persisted))

@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
-from mindroom.history.types import HistoryScope
+from mindroom.history.types import HistoryScope, with_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -792,9 +792,6 @@ _PENDING_FORCE_KEY = "mindroom_pending_compaction_scope_keys"
 
 
 def _fold_force_requests(connection: sqlite3.Connection, names: AgnoTableNames, owner: HistoryScope) -> None:
-    # The owner of the flag imports the store opener, which imports this module.
-    from mindroom.history.storage import with_force_compaction  # noqa: PLC0415
-
     sessions = quote_identifier(names.sessions)
     for session_id, raw_data, raw_metadata in connection.execute(
         f"SELECT session_id, session_data, metadata FROM {sessions}",  # noqa: S608

@@ -11,14 +11,15 @@ from mindroom.tool_system.worker_routing import parse_tool_execution_identity_pa
 from mindroom.workers.models import WorkerSandboxConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Collection, Mapping, Sequence
 
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.runs import RunRecord, RunRequirement
     from mindroom.llm.usage import RunMetrics
+    from mindroom.tool_jobs.runtime import JobSpec, ToolJobRuntime
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.models import ScriptResourceProfileName
@@ -446,3 +447,56 @@ class ChildResponseRunner(Protocol):
         ``prior_usage`` is the usage of the child's turn before this response, by run id, which its runs' records carry.
         """
         ...
+
+
+class DirectChildResponseRunner(Protocol):
+    """Run a child turn with control over native approval pausing and the approval config."""
+
+    async def __call__(
+        self,
+        child: DelegationChild,
+        *,
+        prompt: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+        supports_native_tool_approval: bool = True,
+        approval_config: Config | None = None,
+        prior_usage: Mapping[str, RunMetrics] | None = None,
+    ) -> str:
+        """Execute the child response in its retained scope with the supplied approval policy."""
+        ...
+
+
+class _DelegationJobBuilder(Protocol):
+    """Build the managed background job for a prepared subagent call."""
+
+    def __call__(
+        self,
+        child: DelegationChild,
+        *,
+        job_id: str,
+        runtime: ToolJobRuntime,
+        owner: ToolExecutionIdentity,
+        parent_run_id: str | None,
+        tool_name: str,
+        arguments: dict[str, Any],
+        run_child: ChildResponseRunner,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+        prompt: str | None = None,
+        paused: tuple[RunRecord, Sequence[Sequence[str]]] | None = None,
+        receipts: Mapping[str, float] | None = None,
+    ) -> JobSpec | str:
+        """Return the job or explain why the prepared call cannot run."""
+        ...
+
+
+@dataclass(frozen=True)
+class DelegationExecutor:
+    """Execution callbacks supplied by the caller for the delegation paths its build supports."""
+
+    run_child: ChildResponseRunner
+    run_direct_child: DirectChildResponseRunner | None = None
+    build_job: _DelegationJobBuilder | None = None

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
     from mindroom.embeddings.base import EmbeddingPurpose
-    from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
+    from mindroom.embeddings.health_state import EmbedderHealthRecorder
 
 
 #: The most texts one request carries; longer lists go in further requests.

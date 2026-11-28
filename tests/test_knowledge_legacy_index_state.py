@@ -23,7 +23,7 @@ from mindroom.embeddings.errors import EmbedderRequestError
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.index_metadata import load_publication, load_refresh_status, publication_path
 from mindroom.knowledge.legacy_index_state import migrate_knowledge_index_state
-from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
+from mindroom.knowledge.refresh_worker import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import get_published_index, published_index_storage_path, resolve_published_index_key
 from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths

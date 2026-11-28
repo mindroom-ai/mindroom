@@ -6,12 +6,10 @@ from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-import typer
 import yaml
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
-from mindroom.cli.config import activate_cli_runtime, console, print_literal
-from mindroom.config.main import Config, config_validation_summary
+from mindroom.config.main import Config
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 
 if TYPE_CHECKING:
@@ -59,14 +57,8 @@ def _write_source(config_path: Path, original: bytes, source: bytes) -> None:
         atomic_write_bytes_at(directory_fd, config_path.name, source, file_mode=mode)
 
 
-def apply_local_model(*, model: str, base_url: str, api_key: str, path: Path | None) -> None:
+def apply_local_model(*, model: str, base_url: str, api_key: str, runtime: RuntimePaths) -> None:
     """Validate and atomically replace the default model, retaining an original backup."""
-    runtime = activate_cli_runtime(path)
-    try:
-        original = runtime.config_path.read_bytes()
-        source = _updated_source(original, runtime, model, base_url, api_key)
-        _write_source(runtime.config_path, original, source)
-    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
-        print_literal("[red]Local model configuration failed:[/red] ", config_validation_summary(exc))
-        raise typer.Exit(1) from None
-    console.print("[green]Default model now runs locally.[/green] Explicitly selected agent models were kept.")
+    original = runtime.config_path.read_bytes()
+    source = _updated_source(original, runtime, model, base_url, api_key)
+    _write_source(runtime.config_path, original, source)

@@ -30,7 +30,7 @@ from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
 from mindroom.config.resolution import memory_backend as agent_memory_backend
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
-from mindroom.delegation.execution import drive_delegation_stream
+from mindroom.delegation.execution import delegation_call_job, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_tool_runtime_context,
@@ -40,7 +40,7 @@ from mindroom.delegation.lifecycle import (
     reload_stopped_child_result,
     running_child_run,
 )
-from mindroom.delegation.state import child_execution_identity
+from mindroom.delegation.state import DelegationExecutor, child_execution_identity
 from mindroom.error_handling import empty_response_error_info, log_reply_error, model_error_labels
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.failure_text import failure_text
@@ -595,6 +595,7 @@ async def _start_agent_run(
             storage=storage,
             response_context=run_context.turn,
             context_documents=prepared.cli_context,
+            run_child=run_delegated_child_response,
             delegation_depth=run_context.turn.delegation_depth,
             refresh_scheduler=run_context.turn.refresh_scheduler,
         )
@@ -906,6 +907,11 @@ async def _prepare_agent_and_prompt(
                 persona=ctx.persona,
                 tool_names=ctx.tool_names,
                 worker_sandbox=ctx.worker_sandbox,
+                delegation_executor=DelegationExecutor(
+                    run_child=run_delegated_child_response,
+                    run_direct_child=run_delegated_child_response,
+                    build_job=delegation_call_job,
+                ),
             )
         return runtime_model, _with_prompt_hold(ctx, build, scope_context)
 

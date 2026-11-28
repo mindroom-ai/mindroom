@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.config.authored_overrides import AUTHORED_OVERRIDE_INHERIT
 from mindroom.config.legacy_fields import retired_stored_tool_setting, retired_tool_override
 from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
@@ -83,7 +84,6 @@ _TOOLKIT_FILTER_CONFIG_FIELDS = (
         description="Optional denylist of functions to register from this toolkit.",
     ),
 )
-_AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
 
 
 class ToolInitOverrideError(ValueError):
@@ -92,23 +92,6 @@ class ToolInitOverrideError(ValueError):
 
 class ToolConfigOverrideError(ValueError):
     """Raised when authored tool config overrides are invalid."""
-
-
-def apply_authored_overrides(
-    base: dict[str, object],
-    overrides: dict[str, object] | None,
-) -> dict[str, object]:
-    """Apply one authored override layer onto an existing authored-override mapping."""
-    resolved = dict(base)
-    if not overrides:
-        return resolved
-
-    for field_name, value in overrides.items():
-        if value == _AUTHORED_OVERRIDE_INHERIT:
-            resolved.pop(field_name, None)
-        else:
-            resolved[field_name] = value
-    return resolved
 
 
 def _sanitize_safe_tool_init_override_value(
@@ -223,7 +206,7 @@ def _validate_authored_override_value(
     metadata: ToolMetadata | ToolValidationInfo,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
-    if value is None or value == _AUTHORED_OVERRIDE_INHERIT:
+    if value is None or value == AUTHORED_OVERRIDE_INHERIT:
         return value
 
     if field.type in _TEXT_CONFIG_FIELD_TYPES:
@@ -474,7 +457,7 @@ def _apply_tool_config_init_values(
         if field.name not in values:
             continue
         value = values[field.name]
-        if skip_inherited and value == _AUTHORED_OVERRIDE_INHERIT:
+        if skip_inherited and value == AUTHORED_OVERRIDE_INHERIT:
             continue
         if field.type == "number":
             value = _coerce_number_tool_config_value(tool_name, field.name, value)

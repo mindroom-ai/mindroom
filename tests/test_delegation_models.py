@@ -17,7 +17,7 @@ from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.agent_tool_helpers import toolkit_offers
-from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, respond
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, default_delegation_executor, respond
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
@@ -112,6 +112,7 @@ async def test_subagent_model_selection(
                 config,
                 agent_workspace_root_path(paths.storage_root, "leader"),
                 execution_identity=identity,
+                delegation_executor=default_delegation_executor(),
             )
             result = await toolkit.run_subagent(task="Report", agent_name=agent_name, model=model)
 
@@ -157,7 +158,13 @@ def test_the_subagent_tool_description_lists_each_model_s_reasoning_levels(tmp_p
         defaults=DefaultsConfig(tools=[]),
     )
     paths = _runtime_paths(tmp_path)
-    tools = DelegateTools("leader", paths, config, agent_workspace_root_path(paths.storage_root, "leader"))
+    tools = DelegateTools(
+        "leader",
+        paths,
+        config,
+        agent_workspace_root_path(paths.storage_root, "leader"),
+        delegation_executor=default_delegation_executor(),
+    )
 
     description = toolkit_offers(tools, "run_subagent").description
 

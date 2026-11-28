@@ -26,6 +26,7 @@ from structlog.testing import capture_logs
 from mindroom.api import config_lifecycle, connections, egress_credentials, egress_status, main, oauth
 from mindroom.api.connection_agents import build_connection_agent_target
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
+from mindroom.config.egress_presets import EGRESS_PRESETS
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import PersonalAgentRoster, PersonalAgentRosterEntry, personal_agent_roster_path
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
@@ -34,7 +35,6 @@ from mindroom.egress_broker import oauth_source, secrets
 from mindroom.egress_broker.audit import AuditLog, AuditRecord
 from mindroom.egress_broker.env import egress_agent_scope
 from mindroom.egress_broker.oauth_source import resolve_oauth_token
-from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.rules import EgressRules, route_request
 from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.egress_broker.user_services import (

@@ -14,6 +14,7 @@ import yaml
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.authored_overrides import AUTHORED_OVERRIDE_INHERIT
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config, load_config_or_user_error
 from mindroom.config.matrix import MindRoomUserConfig
@@ -35,7 +36,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
@@ -1830,7 +1830,7 @@ class TestConsolidatedConfigManager:
                     "code": {
                         "display_name": "Code",
                         "tools": [
-                            {"clickup": {"master_space_id": _AUTHORED_OVERRIDE_INHERIT}},
+                            {"clickup": {"master_space_id": AUTHORED_OVERRIDE_INHERIT}},
                         ],
                     },
                 },

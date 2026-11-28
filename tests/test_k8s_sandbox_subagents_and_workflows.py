@@ -112,7 +112,7 @@ from mindroom.workflow_runs.peers import NodeRef, send
 from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, default_delegation_executor
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.test_kubernetes_worker_backend import _named_backend, _named_spec
 from tests.test_kubernetes_worker_backend import _spec as _k8s_spec
@@ -1535,7 +1535,15 @@ async def test_non_matrix_and_detached_delegate_hides_and_refuses_minimal_while_
     # Detached / OpenAI-compat execution refuses minimal=True and mode:minimal profiles BEFORE creating any child.
     helper_model = ScriptedModel([answer("standard sandbox ok")])
     ScriptedAgents({"leader": ScriptedModel([]), "helper": helper_model}).install(monkeypatch)
-    detached_tools = DelegateTools("leader", paths, cfg, ws, openai_identity, delegation_depth=0)
+    detached_tools = DelegateTools(
+        "leader",
+        paths,
+        cfg,
+        ws,
+        openai_identity,
+        delegation_depth=0,
+        delegation_executor=default_delegation_executor(),
+    )
     sessions_dir = paths.storage_root / "subagent_sessions"
 
     authority = DetachedRequesterContext(

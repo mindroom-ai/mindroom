@@ -19,6 +19,7 @@ from mindroom.contacts.turns import contact_session_check
 from mindroom.durable_write import write_json_file_durable
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.history.session_runs import Cursor, back_off, caught_up, due_conversations, start_seq, unredacted
+from mindroom.knowledge_graph.async_support import UnusableExtractionError
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
     RenderedEpisode,
@@ -29,7 +30,7 @@ from mindroom.knowledge_graph.episodes import (
 from mindroom.knowledge_graph.legacy_ingestion import released_ingestion_markers
 from mindroom.knowledge_graph.names import entity_names
 from mindroom.knowledge_graph.scope import graph_scopes
-from mindroom.knowledge_graph.store import UnusableExtractionError, record_knowledge_graph_failure
+from mindroom.knowledge_graph.store import record_knowledge_graph_failure
 from mindroom.knowledge_graph.usage import UsageTarget
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_session_storage

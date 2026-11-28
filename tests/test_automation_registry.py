@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import types
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.automations import Ask, AutomationContext, automation
+from mindroom.automations.builtins import BUILTIN_AUTOMATION_DEFINITIONS, resolve_automation_definition
 from mindroom.automations.registry import (
     AutomationCatalog,
     automation_reference_errors,
@@ -15,6 +18,7 @@ from mindroom.automations.registry import (
     iter_module_automations,
 )
 from mindroom.config.agent import AgentConfig
+from mindroom.config.automations import BUILTIN_AUTOMATION_NAMES
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.config.plugin import PluginEntryConfig
@@ -77,18 +81,58 @@ def test_plugin_automations_compile_with_their_plugin_settings() -> None:
     definition = catalog.get("weekly_digest")
     assert definition is not None
     assert definition.settings == {"key": "value"}
+    assert catalog.is_provided("weekly_digest")
+    assert resolve_automation_definition("weekly_digest", catalog) is definition
     assert catalog.collisions == ("dreaming", "weekly_digest")
 
 
 def test_built_ins_resolve_without_any_plugin() -> None:
-    """The built-ins are always available, and an empty catalog loads them only when one is looked up."""
+    """Built-in definitions stay outside the plugin catalog but are always available to run."""
     catalog = compile_automations([])
 
-    for name in ("prompt_curation", "dreaming"):
-        definition = catalog.get(name)
+    assert frozenset(BUILTIN_AUTOMATION_DEFINITIONS) == frozenset(BUILTIN_AUTOMATION_NAMES)
+    assert catalog.get("dreaming") is None
+    assert catalog.is_provided("dreaming")
+    assert not catalog.is_provided("weekly_digest")
+    for name in ("prompt_curation", "dreaming", "exploration"):
+        definition = resolve_automation_definition(name, catalog)
         assert definition is not None
-        assert definition.requires_file_memory
-    assert catalog.get("weekly_digest") is None
+        assert definition.name == name
+        assert definition.requires_file_memory is (name != "exploration")
+    assert resolve_automation_definition("weekly_digest", catalog) is None
+
+
+def test_automation_and_hook_registries_do_not_import_domain_backends() -> None:
+    """Plugin loading and built-in name validation do not need FastAPI or automation implementations."""
+    probe = """
+import sys
+
+import mindroom.hooks.registry
+import mindroom.tool_system.plugins
+from mindroom.automations.registry import automation_reference_errors, compile_automations
+from mindroom.config.main import Config
+
+config = Config(defaults={"automations": ["dreaming"]})
+assert automation_reference_errors(config, compile_automations([])) == []
+
+forbidden = (
+    "fastapi",
+    "mindroom.memory",
+    "mindroom.knowledge_graph",
+    "mindroom.contacts",
+    "mindroom.session_storage",
+    "mindroom.automations.dreaming",
+    "mindroom.automations.exploration",
+    "mindroom.automations.prompt_curation",
+)
+loaded = sorted(
+    name for name in sys.modules
+    if any(name == root or name.startswith(root + ".") for root in forbidden)
+)
+assert not loaded, loaded
+"""
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False, timeout=120)
+    assert result.returncode == 0, result.stderr
 
 
 def test_reference_errors_cover_defaults_explicit_lists_and_collisions() -> None:
