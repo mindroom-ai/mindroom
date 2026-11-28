@@ -1287,6 +1287,21 @@
         "tts": {
           "$ref": "#/$defs/SpeechServiceConfig",
           "description": "Text-to-speech service"
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "maximum": 4.0,
+              "minimum": 0.25,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Initial speaking rate multiplier (0.25 to 4.0, or 0.25 to 1.5 for gpt-realtime TTS; default 1.0)",
+          "title": "Speed"
         }
       },
       "required": [
@@ -3676,9 +3691,31 @@
           "type": "string"
         },
         "voice": {
-          "description": "Live model voice preset",
-          "title": "Voice",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/LiveCustomVoice"
+            }
+          ],
+          "description": "Live model voice preset name or custom voice reference ({id: 'voice_...'})",
+          "title": "Voice"
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "maximum": 1.5,
+              "minimum": 0.25,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Initial speaking rate multiplier (0.25 to 1.5; default 1.0)",
+          "title": "Speed"
         },
         "agent_model": {
           "anyOf": [
@@ -3704,6 +3741,23 @@
         "voice"
       ],
       "title": "LiveCallProfile",
+      "type": "object"
+    },
+    "LiveCustomVoice": {
+      "additionalProperties": false,
+      "description": "Reference to an OpenAI prompt-to-voice custom voice.",
+      "properties": {
+        "id": {
+          "description": "OpenAI custom voice ID, such as voice_...",
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "LiveCustomVoice",
       "type": "object"
     },
     "MCPOAuthConfig": {
@@ -5228,6 +5282,21 @@
           "description": "Realtime model voice preset",
           "title": "Voice",
           "type": "string"
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "maximum": 1.5,
+              "minimum": 0.25,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Initial speaking rate multiplier (0.25 to 1.5; default 1.0)",
+          "title": "Speed"
         }
       },
       "required": [

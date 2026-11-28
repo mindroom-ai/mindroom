@@ -32,7 +32,10 @@ async def test_realtime_tts_pushes_pcm_frames(monkeypatch: pytest.MonkeyPatch) -
     frames = [event.frame async for event in tts.synthesize("Hello there.")]
 
     assert calls == [
-        ("Hello there.", {"model": "gpt-realtime-2.1-mini", "voice": "ash", "api_key": "sk-test", "base_url": None}),
+        (
+            "Hello there.",
+            {"model": "gpt-realtime-2.1-mini", "voice": "ash", "api_key": "sk-test", "base_url": None, "speed": None},
+        ),
     ]
     audio = b"".join(bytes(frame.data) for frame in frames)
     spoken = b"\x01\x00" * 2400 + b"\x02\x00" * 2400
@@ -89,7 +92,7 @@ async def test_realtime_tts_refusal_keeps_its_http_status(monkeypatch: pytest.Mo
 def test_realtime_tts_rejects_unknown_options() -> None:
     """Options the Realtime voice does not take fail when the call starts, as an invalid TTS option does."""
     with pytest.raises(TypeError):
-        RealtimeTTS(model="gpt-realtime-2.1-mini", api_key="sk-test", speed=1.2)  # ty: ignore[unknown-argument]
+        RealtimeTTS(model="gpt-realtime-2.1-mini", api_key="sk-test", response_format="mp3")  # ty: ignore[unknown-argument]
 
 
 def test_cascaded_tts_uses_realtime_for_realtime_models() -> None:
@@ -131,3 +134,52 @@ def test_cascaded_tts_keeps_speech_endpoint_models(monkeypatch: pytest.MonkeyPat
             "base_url": "http://localhost:8880/v1",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_realtime_tts_passes_and_updates_speed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Initial speed and update_options(speed=...) control subsequent synthesized segments."""
+    calls: list[tuple[str, object]] = []
+
+    async def stream(text: str, **kwargs: object) -> AsyncIterator[bytes]:
+        calls.append((text, kwargs.get("speed")))
+        yield b"\x01\x00" * 2400
+
+    monkeypatch.setattr(realtime_tts, "stream_realtime_speech", stream)
+    tts = RealtimeTTS(model="gpt-realtime-2.1-mini", api_key="sk-test", voice="ash", speed=1.25)
+
+    _ = [event async for event in tts.synthesize("First.")]
+    tts.update_options(speed=0.75)
+    _ = [event async for event in tts.synthesize("Second.")]
+    tts.update_options(speed=None)
+    _ = [event async for event in tts.synthesize("Third.")]
+
+    assert calls == [("First.", 1.25), ("Second.", 0.75), ("Third.", 0.75)]
+
+
+def test_cascaded_tts_forwards_speed_to_realtime_and_endpoint_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Profile-level speed is passed to both RealtimeTTS and LiveKit's OpenAI speech-endpoint TTS."""
+    rt_tts = _cascaded_tts(
+        SpeechServiceOptions(
+            provider="openai",
+            model="gpt-realtime-2.1-mini",
+            api_key="sk-test",
+            extra_kwargs={"voice": "ash"},
+        ),
+        speed=1.3,
+    )
+    assert isinstance(rt_tts, RealtimeTTS)
+    assert rt_tts._speed == 1.3
+
+    built: list[dict[str, object]] = []
+    monkeypatch.setattr("livekit.plugins.openai.TTS", lambda **kwargs: built.append(kwargs) or "endpoint-tts")
+    _cascaded_tts(
+        SpeechServiceOptions(
+            provider="openai",
+            model="tts-1",
+            api_key="sk-test",
+            extra_kwargs={"voice": "ash"},
+        ),
+        speed=1.8,
+    )
+    assert built == [{"voice": "ash", "model": "tts-1", "api_key": "sk-test", "speed": 1.8}]

@@ -204,11 +204,17 @@ class ProcessLiveVoiceBridge:
                 "model": options.model,
                 "api_key": options.api_key,
                 "voice": options.voice,
+                "speed": options.speed,
                 "instructions": instructions,
                 "greeting_instructions": options.greeting_instructions,
             },
         )
         self._agent_started = True
+
+    def set_speaking_rate(self, rate: float) -> None:
+        """Forward a speaking-rate adjustment to the child's live bridge."""
+        if not self._closing:
+            self._send({"type": "SetSpeakingRate", "speed": rate})
 
     async def aclose(self) -> None:
         """Close the child's call, wait for its last events, then close the delegate."""

@@ -27,6 +27,7 @@ import nio
 from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.config.calls import LiveCustomVoice
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
@@ -159,7 +160,9 @@ _LIVE_VOICE_INSTRUCTIONS = (
     "Answer directly when the answer is already in the supplied context or conversation. "
     "Delegate requests needing tools, research, additional memory, or actions to the agent; "
     "it executes the tool workflows described above. Relay its answer conversationally. Never claim to have "
-    "checked information or completed work until the agent returns the result."
+    "checked information or completed work until the agent returns the result. "
+    "When the caller asks you to speak faster, slower, or at a specific speed, adjust your pace immediately "
+    "and delegate the speed change so it persists."
 )
 _LIVE_INSTRUCTION_TOKEN_LIMIT = 16_000
 _LIVE_MIN_BRIEF_TOKENS = 300
@@ -168,7 +171,9 @@ _LIVE_OVERSIZED_INSTRUCTIONS = (
     "not this voice model. Delegate every substantive user request to the agent, including questions, requests "
     "about identity or preferences, research, memory, tools, and actions. Do not answer substantive requests from "
     "your own knowledge or infer omitted instructions. Relay only the agent's returned answer, briefly and naturally, "
-    "without markdown. Never claim to have checked information or completed work until the agent returns the result."
+    "without markdown. Never claim to have checked information or completed work until the agent returns the result. "
+    "When the caller asks you to speak faster, slower, or at a specific speed, adjust your pace immediately "
+    "and delegate the speed change so it persists."
 )
 
 
@@ -1377,6 +1382,7 @@ class CallManager:
                 session_id=logical_call.agent_session_id,
                 call_config=call_config,
                 origin_context=origin_context,
+                set_speaking_rate=bridge.set_speaking_rate,
             )
             transcript = CallTranscript.start(
                 agent_name=self._agent_name,
@@ -1752,6 +1758,7 @@ class CallManager:
         session_id: str,
         call_config: CallProfile,
         origin_context: CallOriginContext | None = None,
+        set_speaking_rate: Callable[[float], None] | None = None,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
         enable_responder = call_config.backend in {"cascaded", "live"}
@@ -1778,6 +1785,8 @@ class CallManager:
             reconcile_spoken_response=call_config.backend != "live",
             origin_brief=partial(self._call_context_text, origin_context) if enable_responder else None,
             instructions_room_id=origin_context.origin.room_id if origin_context is not None else None,
+            set_speaking_rate=set_speaking_rate,
+            speaking_rate_bounds=call_config.speaking_rate_bounds,
         )
 
     def _call_context_text(self, origin_context: CallOriginContext | None, counter: TokenCounter) -> str:
@@ -1860,6 +1869,7 @@ class CallManager:
                 model=realtime_config.model,
                 api_key=backend.realtime_api_key,
                 voice=realtime_config.voice,
+                speed=realtime_config.speed,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
                 close_tools=tooling.close,
@@ -1898,7 +1908,10 @@ class CallManager:
                 get_instructions=get_live_instructions,
                 model=live_config.model,
                 api_key=backend.realtime_api_key,
-                voice=live_config.voice,
+                voice=live_config.voice.model_dump()
+                if isinstance(live_config.voice, LiveCustomVoice)
+                else live_config.voice,
+                speed=live_config.speed,
                 respond=tooling.responder,
                 record_usage=partial(
                     record_call_voice_usage,
@@ -1919,6 +1932,7 @@ class CallManager:
         return CascadedVoiceAgentOptions(
             stt=backend.stt,
             tts=backend.tts,
+            speed=call_config.speed,
             respond=tooling.responder,
             finalize_spoken_response=tooling.finalize_spoken_response,
             close_responder=tooling.close,

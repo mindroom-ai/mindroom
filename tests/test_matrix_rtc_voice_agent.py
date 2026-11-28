@@ -1760,3 +1760,156 @@ async def test_aclose_disconnects_room_when_session_close_fails() -> None:
         await bridge.aclose()
 
     room.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_realtime_bridge_applies_startup_pending_mid_call_and_closed_speaking_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RealtimeVoiceBridge forwards speed on startup, updates active models mid-call, and stops after aclose."""
+    created_kwargs: list[dict[str, object]] = []
+    updated_speeds: list[float] = []
+
+    class FakeModel:
+        def update_options(self, *, speed: float) -> None:
+            updated_speeds.append(speed)
+
+        async def aclose(self) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+            self.output = SimpleNamespace(audio=MagicMock(), transcription=None)
+
+        def on(self, _event: str, _callback: object) -> None:
+            return None
+
+        async def start(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: FakeSession())
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **kwargs: created_kwargs.append(kwargs) or FakeModel(),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock(
+        disconnect=AsyncMock(),
+        remote_participants={},
+        local_participant=MagicMock(track_publications={}),
+    )
+    await bridge.start_agent(
+        VoiceAgentOptions(instructions="Hi.", model="gpt-realtime-2.1", api_key="sk", voice="marin", speed=1.25),
+    )
+    assert created_kwargs[-1] == {"model": "gpt-realtime-2.1", "api_key": "sk", "voice": "marin", "speed": 1.25}
+
+    bridge.set_speaking_rate(0.8)
+    assert updated_speeds == [0.8]
+
+    await bridge.aclose()
+    bridge.set_speaking_rate(1.4)
+    assert updated_speeds == [0.8]
+
+    # Pre-start speaking rate overrides startup options when start_agent runs next.
+    bridge2 = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge2._room = MagicMock(
+        disconnect=AsyncMock(),
+        remote_participants={},
+        local_participant=MagicMock(track_publications={}),
+    )
+    bridge2.set_speaking_rate(1.35)
+    await bridge2.start_agent(
+        VoiceAgentOptions(instructions="Hi.", model="gpt-realtime-2.1", api_key="sk", speed=0.9),
+    )
+    assert created_kwargs[-1] == {"model": "gpt-realtime-2.1", "api_key": "sk", "speed": 1.35}
+    await bridge2.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_bridge_applies_startup_pending_mid_call_and_closed_speaking_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CascadedVoiceBridge passes speed to TTS, updates it mid-call, and clears it on aclose."""
+    tts_kwargs: list[dict[str, object]] = []
+    updated_speeds: list[float] = []
+
+    class FakeTTS:
+        def update_options(self, *, speed: float) -> None:
+            updated_speeds.append(speed)
+
+        async def aclose(self) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+            self.output = SimpleNamespace(audio=MagicMock(), transcription=None)
+
+        def on(self, _event: str, _callback: object) -> None:
+            return None
+
+        async def start(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: FakeSession())
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr("livekit.agents.inference.VAD", lambda **_kwargs: object())
+    monkeypatch.setattr("livekit.plugins.openai.STT", lambda **_kwargs: object())
+    monkeypatch.setattr("livekit.plugins.openai.TTS", lambda **kwargs: tts_kwargs.append(kwargs) or FakeTTS())
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **_kwargs: SimpleNamespace(close=AsyncMock()))
+    monkeypatch.setattr(
+        "livekit.agents.voice.transcription.TranscriptSynchronizer",
+        lambda **_kwargs: SimpleNamespace(audio_output=object(), text_output=object(), aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: MagicMock(aclose=AsyncMock()),
+    )
+
+    bridge = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = MagicMock(
+        disconnect=AsyncMock(),
+        remote_participants={},
+        local_participant=MagicMock(track_publications={}),
+    )
+    options = CascadedVoiceAgentOptions(
+        stt=SpeechServiceOptions(provider="openai", model="gpt-transcribe", api_key="stt-key"),
+        tts=SpeechServiceOptions(provider="openai", model="tts-1", api_key="tts-key", extra_kwargs={"voice": "ash"}),
+        respond=AsyncMock(return_value=CallAgentResponse("Hi.")),
+        speed=1.4,
+    )
+    await bridge.start_agent(options)
+    assert tts_kwargs[-1]["speed"] == 1.4
+
+    bridge.set_speaking_rate(0.85)
+    assert updated_speeds == [0.85]
+
+    await bridge.aclose()
+    bridge.set_speaking_rate(1.9)
+    assert updated_speeds == [0.85]
+
+    bridge2 = CascadedVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge2._room = MagicMock(
+        disconnect=AsyncMock(),
+        remote_participants={},
+        local_participant=MagicMock(track_publications={}),
+    )
+    bridge2.set_speaking_rate(1.6)
+    await bridge2.start_agent(options)
+    assert tts_kwargs[-1]["speed"] == 1.6
+    await bridge2.aclose()

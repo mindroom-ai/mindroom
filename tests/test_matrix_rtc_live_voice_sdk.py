@@ -853,3 +853,106 @@ async def test_live_sdk_times_delegation_stages_through_the_provider_ack(provide
         ("first", "commentary_appended"),
         ("first", "commentary_acked"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_live_sdk_startup_speed_custom_voice_mid_call_append_and_reconnect(
+    provider: _ProviderHTTP,
+) -> None:
+    """Startup speed, custom voice objects, mid-call updates, and reconnect replay work on the real GPTLive SDK."""
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Base instructions."),
+        model="gpt-live-1.1",
+        api_key="test-key",
+        voice={"id": "voice_custom_42"},
+        speed=1.25,
+        respond=AsyncMock(return_value=CallAgentResponse("Done.")),
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    try:
+        await bridge.start_agent(options)
+        start = await provider.socket.next_event("session.start")
+        assert start["session"]["audio"]["output"]["voice"] == {"id": "voice_custom_42"}
+        assert "Base instructions." in start["session"]["instructions"]
+        assert "1.25x" in start["session"]["instructions"]
+
+        bridge.set_speaking_rate(0.75)
+        appended = await provider.socket.next_event("session.instructions.append")
+        assert "0.75x" in appended["content"]
+        assert "slower" in appended["content"].lower()
+
+        # Reconnect replays the mid-call override because it differs from startup speed 1.25.
+        provider.socket.content_close()
+        await asyncio.wait_for(provider.connected_again.wait(), 2)
+        second = provider.sockets[1]
+        second_start = await second.next_event("session.start")
+        assert second_start["session"]["audio"]["output"]["voice"] == {"id": "voice_custom_42"}
+        replayed = await second.next_event("session.instructions.append")
+        assert "0.75x" in replayed["content"]
+    finally:
+        await asyncio.wait_for(bridge.aclose(), 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("speed", [None, 1.0])
+async def test_live_sdk_default_speed_does_not_append_startup_or_reconnect_pacing(
+    provider: _ProviderHTTP,
+    speed: float | None,
+) -> None:
+    """Default or 1.0 startup speed leaves startup instructions clean and does not replay on reconnect."""
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Base instructions."),
+        model="gpt-live-1.1",
+        api_key="test-key",
+        voice="marin",
+        speed=speed,
+        respond=AsyncMock(),
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    try:
+        await bridge.start_agent(options)
+        start = await provider.socket.next_event("session.start")
+        assert start["session"]["instructions"] == "Base instructions."
+
+        provider.socket.content_close()
+        await asyncio.wait_for(provider.connected_again.wait(), 2)
+        second = provider.sockets[1]
+        await second.next_event("session.start")
+        await asyncio.sleep(0.05)
+        assert not [event for event in second.sent if event.get("type") == "session.instructions.append"]
+    finally:
+        await asyncio.wait_for(bridge.aclose(), 3)
+
+
+@pytest.mark.asyncio
+async def test_live_sdk_speaking_rate_set_before_on_enter_applies_on_enter(
+    provider: _ProviderHTTP,
+) -> None:
+    """A speaking-rate update arriving after agent creation but before on_enter is applied once the session enters."""
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Base instructions."),
+        model="gpt-live-1.1",
+        api_key="test-key",
+        voice="marin",
+        respond=AsyncMock(),
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+
+    original_start_session = bridge._start_session
+
+    async def start_session_with_early_rate(*args: object, **kwargs: object) -> None:
+        bridge.set_speaking_rate(1.4)
+        await original_start_session(*args, **kwargs)
+
+    bridge._start_session = start_session_with_early_rate  # type: ignore[method-assign]
+    try:
+        await bridge.start_agent(options)
+        start = await provider.socket.next_event("session.start")
+        assert start["session"]["instructions"] == "Base instructions."
+        appended = await provider.socket.next_event("session.instructions.append")
+        assert "1.4x" in appended["content"]
+    finally:
+        await asyncio.wait_for(bridge.aclose(), 3)

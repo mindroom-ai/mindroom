@@ -350,6 +350,7 @@ class VoiceAgentOptions:
     model: str
     api_key: str
     voice: str | None = None
+    speed: float | None = None
     greeting_instructions: str | None = None
     #: LiveKit function tools exposed to the realtime model.
     tools: tuple[Any, ...] = ()
@@ -385,6 +386,7 @@ class CascadedVoiceAgentOptions:
     stt: SpeechServiceOptions
     tts: SpeechServiceOptions
     respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]]
+    speed: float | None = None
     finalize_spoken_response: Callable[[str | None, str, bool], Awaitable[None] | None] | None = None
     close_responder: Callable[[], Awaitable[None]] | None = None
     greeting_text: str | None = None
@@ -430,8 +432,9 @@ class LiveVoiceAgentOptions:
     get_instructions: Callable[[], Awaitable[str]]
     model: str
     api_key: str
-    voice: str
+    voice: str | dict[str, Any]
     respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]]
+    speed: float | None = None
     record_usage: Callable[[LiveVoiceUsage], Awaitable[None]] | None = None
     close_responder: Callable[[], Awaitable[None]] | None = None
     greeting_instructions: str | None = None
@@ -453,6 +456,8 @@ class RealtimeVoiceBridge:
         self._room: Any = None
         self._connect_task: asyncio.Task[None] | None = None
         self._session: Any = None
+        self._realtime_model: Any = None
+        self._pending_speaking_rate: float | None = None
         self._owned_speech_resource_closers: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._session_event_tasks: set[asyncio.Future[None]] = set()
         self._usage_lock = asyncio.Lock()
@@ -582,10 +587,15 @@ class RealtimeVoiceBridge:
         if not isinstance(options, VoiceAgentOptions):
             msg = "RealtimeVoiceBridge requires realtime agent options"
             raise TypeError(msg)
+        speed = self._pending_speaking_rate if self._pending_speaking_rate is not None else options.speed
+        self._pending_speaking_rate = None
+        model_kwargs: dict[str, Any] = {"model": options.model, "api_key": options.api_key}
         if options.voice:
-            model = realtime.RealtimeModel(model=options.model, api_key=options.api_key, voice=options.voice)
-        else:
-            model = realtime.RealtimeModel(model=options.model, api_key=options.api_key)
+            model_kwargs["voice"] = options.voice
+        if speed is not None:
+            model_kwargs["speed"] = speed
+        model = realtime.RealtimeModel(**model_kwargs)
+        self._realtime_model = model
         self._owned_speech_resource_closers += (model.aclose,)
         if options.close_tools is not None:
             self._owned_speech_resource_closers += (options.close_tools,)
@@ -960,10 +970,19 @@ class RealtimeVoiceBridge:
 
             session.on("close", _on_close)
 
+    def set_speaking_rate(self, rate: float) -> None:
+        """Adjust the realtime model speaking rate for subsequent turns."""
+        if self._realtime_model is not None:
+            self._realtime_model.update_options(speed=rate)
+        else:
+            self._pending_speaking_rate = rate
+
     async def aclose(self) -> None:
         """Tear down the agent session and leave the SFU."""
         session = self._session
         self._session = None
+        self._realtime_model = None
+        self._pending_speaking_rate = None
         for timer in self._inbound_key_timers.values():
             timer.cancel()
         self._inbound_key_timers.clear()
@@ -1020,6 +1039,17 @@ class RealtimeVoiceBridge:
 class CascadedVoiceBridge(RealtimeVoiceBridge):
     """Existing MatrixRTC media bridge with a cascaded speech session on top."""
 
+    def __init__(self, *, local_identity: str, e2ee_enabled: bool) -> None:
+        super().__init__(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
+        self._tts: Any = None
+
+    def set_speaking_rate(self, rate: float) -> None:
+        """Adjust the cascaded TTS speaking rate for subsequent segments."""
+        if self._tts is not None:
+            self._tts.update_options(speed=rate)
+        else:
+            self._pending_speaking_rate = rate
+
     async def start_agent(self, options: CallVoiceAgentOptions) -> None:
         """Start STT -> normal MindRoom agent -> TTS on the connected room."""
         from livekit import rtc  # noqa: PLC0415
@@ -1036,6 +1066,8 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         if options.close_responder is not None:
             self._owned_speech_resource_closers += (options.close_responder,)
 
+        speed = self._pending_speaking_rate if self._pending_speaking_rate is not None else options.speed
+        self._pending_speaking_rate = None
         stt_client = AsyncOpenAI(
             api_key=options.stt.api_key,
             base_url=options.stt.base_url,
@@ -1046,10 +1078,11 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         stt_kwargs.pop("base_url", None)
         try:
             stt = openai.STT(client=stt_client, **stt_kwargs)
-            tts = _cascaded_tts(options.tts)
+            tts = _cascaded_tts(options.tts, speed=speed)
         except BaseException:
             await stt_client.close()
             raise
+        self._tts = tts
         self._owned_speech_resource_closers += (stt_client.close, tts.aclose)
         mindroom_llm = _build_mindroom_llm(options.respond, options.on_tools_executed)
         session = AgentSession(
@@ -1068,6 +1101,11 @@ class CascadedVoiceBridge(RealtimeVoiceBridge):
         await self._start_session(session, agent, options, rtc_module=rtc, room_io_module=room_io)
         if options.greeting_text:
             session.say(options.greeting_text)
+
+    async def aclose(self) -> None:
+        """Clear TTS state before tearing down the cascaded session."""
+        self._tts = None
+        await super().aclose()
 
 
 def _describe_voice_error(event: ErrorEvent) -> str:
@@ -1134,17 +1172,20 @@ def _exception_chain_text(error: object) -> str:
     return " | ".join(parts)
 
 
-def _cascaded_tts(options: SpeechServiceOptions) -> TTS:
+def _cascaded_tts(options: SpeechServiceOptions, *, speed: float | None = None) -> TTS:
     """Build a cascaded call's TTS: Realtime for ``gpt-realtime`` models, the speech endpoint otherwise."""
     from livekit.plugins import openai  # noqa: PLC0415
 
     from mindroom.voice.openai_realtime_speech import is_realtime_speech_model  # noqa: PLC0415
 
+    kwargs = _speech_component_kwargs(options)
+    if speed is not None:
+        kwargs["speed"] = speed
     if is_realtime_speech_model(options.model):
         from mindroom.matrix_rtc.realtime_tts import RealtimeTTS  # noqa: PLC0415
 
-        return RealtimeTTS(**_speech_component_kwargs(options))
-    return openai.TTS(**_speech_component_kwargs(options))
+        return RealtimeTTS(**kwargs)
+    return openai.TTS(**kwargs)
 
 
 def _speech_component_kwargs(options: SpeechServiceOptions) -> dict[str, Any]:
