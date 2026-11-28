@@ -855,9 +855,10 @@ async def test_wrapped_shell_spills_both_streams_once(
     exit_code: int,
 ) -> None:
     """Both local and supervised tools retain heads and tails, and the wrapper does not auto-save the tailed reply."""
+    budget = 512 if stdout_cap else 50 * 1024
     configure_toolkit_functions(
         shell_toolkit,
-        output_files=ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=512, tools_use_workdir=stderr_cap),
+        output_files=ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=budget, tools_use_workdir=stderr_cap),
     )
     out_count = 10_001 if stdout_cap else 2
     err_count = 10_001 if stderr_cap else 2
@@ -869,7 +870,11 @@ async def test_wrapped_shell_spills_both_streams_once(
     async with shell_background_scope():
         result = await _run(
             shell_toolkit,
-            {"args": [sys.executable, "-c", script], "tail": 10_000, "timeout": None if stderr_cap else 10},
+            {
+                "args": [sys.executable, "-c", script],
+                "tail": 10_000 if stdout_cap else 1,
+                "timeout": None if stderr_cap else 10,
+            },
         )
     value = result.result
     if exit_code:
@@ -885,12 +890,11 @@ async def test_wrapped_shell_spills_both_streams_once(
     assert re.fullmatch(r"shell-spill-[0-9a-f]{32}\.txt", saved.name)
     assert stat.S_IMODE(saved.stat().st_mode) == 0o600
     shown_path = saved if stderr_cap else saved.relative_to(tmp_path)
-    assert (
-        value.count(f"Full output saved to {shown_path} (inspect in parts with read_file offset/limit or grep/sed).")
-        == 1
-    )
+    hint = f"Full output saved to {shown_path} (inspect in parts with read_file offset/limit or grep/sed)."
+    assert hint in value.split("\n", 2)[bool(exit_code)]
+    assert value.count(hint) == 1
     assert "Redirect command output" not in value
-    assert len(value.encode("utf-8")) <= 512
+    assert len(value.encode("utf-8")) <= budget
     assert (
         saved.read_text()
         == "out-start\n" + "o\n" * out_count + "out-end\nStderr:\n" + "err-start\n" + "e\n" * err_count + "err-end"
@@ -982,6 +986,20 @@ async def test_cli_shortens_a_published_shell_spill_without_saving_another_file(
     [saved] = directory.iterdir()
     assert f"Full output saved to {saved.relative_to(tmp_path)}" in result
     assert saved.read_text() == "\x01é" * 20000 + "\n"
+
+
+def test_cli_auto_saves_unspilled_output_with_a_spill_notice_in_its_body(tmp_path: Path) -> None:
+    """A copied spill notice inside command output is data, not a receipt for the current call."""
+    path = f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt"
+    text = f"[worker: build]\nExit code 7\nOutput:\nTranscript:\n[Full output saved to {path}]\n" + "x" * _INLINE_BUDGET
+    result = project_cli_result(text, ToolOutputFilePolicy(tmp_path), "run_shell_command")
+
+    assert isinstance(result, dict)
+    saved = result["mindroom_tool_output"]
+    assert saved["status"] == "saved_to_file"
+    (file,) = (tmp_path / "mindroom_tool_outputs").iterdir()
+    assert saved["path"] == str(file.relative_to(tmp_path))
+    assert file.read_text() == text
 
 
 _LARGE_OUTPUT = "print('x' * 52000, flush=True)"
@@ -1169,7 +1187,7 @@ async def test_inline_timeout_publishes_capped_partial_spill(tmp_path: Path) -> 
     assert result.output_file_handled
     assert result.message.startswith("Stopped after 1s.")
     (saved,) = (tmp_path / "mindroom_tool_outputs").iterdir()
-    assert str(saved.relative_to(tmp_path)) in result.message
+    assert str(saved.relative_to(tmp_path)) in result.message.split("\n", 2)[1]
     assert len(result.message.encode("utf-8")) <= 512
     assert saved.read_bytes() == b"x" * 52000 + b"\n"
 

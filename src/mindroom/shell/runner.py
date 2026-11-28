@@ -17,7 +17,6 @@ from mindroom.shell.output import (
     format_shell_completion,
     format_shell_success,
     format_shell_timeout,
-    split_spill_hint,
 )
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputSpill
 from mindroom.shell.process import ManagedProcess, classify_launch_failure
@@ -237,10 +236,9 @@ class ActiveCommand:
         return False
 
     def _render_partial(self, spill_hint: str | None) -> tuple[str, str | None]:
-        stdout_hint, stderr_hint = split_spill_hint(self.stdout_buf, spill_hint)
         return (
-            self.stdout_buf.render(tail=self.tail, spill_hint=stdout_hint),
-            self.stderr_buf.render(spill_hint=stderr_hint) if self.stderr_buf else None,
+            self.stdout_buf.render(tail=self.tail, spill_hint=spill_hint),
+            self.stderr_buf.render(spill_hint=spill_hint) if self.stderr_buf else None,
         )
 
     async def _stop_timed_out(self, *, timeout: float) -> ShellRunResult:  # noqa: ASYNC109
@@ -251,13 +249,13 @@ class ActiveCommand:
             self.spool.incomplete = True
         saved = await self.spill.publish() if self.spill is not None else None
         message = format_shell_timeout(
-            *self._render_partial(saved.hint if saved else None),
+            *self._render_partial("" if saved else None),
             timeout=timeout,
             no_output_file=self.output_capture is not None,
         )
         if self.output_capture is None:
             return ShellRunResult(
-                saved.bound_preview(message, status=f"Stopped after {timeout:g}s.") if saved else message,
+                saved.render_preview(message, status=f"Stopped after {timeout:g}s.") if saved else message,
                 output_file_handled=saved is not None,
                 return_code=self.managed.returncode,
                 timed_out=True,
@@ -317,14 +315,14 @@ class ActiveCommand:
             finally:
                 self.output_capture.close()
         saved = await self.spill.publish() if self.spill is not None and not readers_cancelled else None
-        hint = saved.hint if saved else None
+        hint = "" if saved else None
         if return_code:
             # A failure keeps its whole stderr, which explains it.
             message = format_shell_completion(*self._render_partial(hint), return_code=return_code)
         else:
             message = format_shell_success(self.stdout_buf, self.stderr_buf, self.tail, spill_hint=hint)
         if saved:
-            message = saved.bound_preview(message, status=f"Exit code {return_code}" if return_code else "")
+            message = saved.render_preview(message, status=f"Exit code {return_code}" if return_code else "")
         return ShellRunResult(message, output_file_handled=saved is not None, return_code=return_code)
 
 

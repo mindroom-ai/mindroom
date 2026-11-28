@@ -944,9 +944,9 @@ def test_named_worker_rewrites_only_the_spill_hint_in_an_unstructured_writable_m
     """A failed command also keeps its exit metadata and any occurrence of the path outside the hint."""
     relative = f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt"
     absolute = f"/worker workspace/{relative}"
-    notice = f"[Stderr truncated to the last 51200 bytes. First 64 MiB saved to {absolute} (inspect in parts with read_file offset/limit or grep/sed).]"
+    notice = f"[First 64 MiB saved to {absolute} (inspect in parts with read_file offset/limit or grep/sed).]"
     failure = ToolOutcome(
-        content=f"Exit code 3\nStderr:\n{notice}\n{absolute}",
+        content=f"Exit code 3\n{notice}\nStderr:\n{notice}",
         is_error=True,
         counts_as_tool_failure=False,
     )
@@ -967,16 +967,17 @@ def test_named_worker_rewrites_only_the_spill_hint_in_an_unstructured_writable_m
         assert display(writable) == replace(failure, content=unchanged)
 
 
-def test_named_worker_does_not_rewrite_bare_spill_paths_in_command_output() -> None:
-    """A command can print an artifact name without that ordinary text becoming a receipt."""
-    path = f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt"
+@pytest.mark.parametrize("template", ["{path}", "Transcript:\n[Full output saved to {path}]"])
+def test_named_worker_does_not_rewrite_spill_lookalikes_in_command_output(template: str) -> None:
+    """Bare paths and copied body notices are ordinary text, not receipts."""
+    text = template.format(path=f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt")
     header = "[worker: build]"
     result = sandbox_proxy_module._format_named_worker_result(
-        path,
+        text,
         header=header,
         admitted_sandbox=WorkerSandboxConfig(mount_dir="jobs/build"),
     )
-    assert result == f"{header}\n{path}"
+    assert result == f"{header}\n{text}"
 
 
 def test_named_worker_budgets_the_spill_preview_after_rewriting_its_path() -> None:

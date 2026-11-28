@@ -361,13 +361,6 @@ def format_shell_timeout(stdout: str, stderr: str | None, *, timeout: float, no_
     return "\n".join(lines)
 
 
-def split_spill_hint(stdout_buf: ShellOutputBuffer, hint: str | None) -> tuple[str | None, str | None]:
-    """Put the hint on the first capped stream, suppressing redirect advice on the other one."""
-    if hint is None:
-        return None, None
-    return (hint, "") if stdout_buf.capped else ("", hint)
-
-
 def format_shell_success(
     stdout_buf: ShellOutputBuffer,
     stderr_buf: ShellOutputBuffer,
@@ -376,9 +369,8 @@ def format_shell_success(
     spill_hint: str | None = None,
 ) -> str:
     """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
-    stdout_hint, stderr_hint = split_spill_hint(stdout_buf, spill_hint)
-    output_notice, output = stdout_buf.render_parts(tail=tail, spill_hint=stdout_hint)
-    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr", spill_hint=stderr_hint)
+    output_notice, output = stdout_buf.render_parts(tail=tail, spill_hint=spill_hint)
+    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr", spill_hint=spill_hint)
     completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
     return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
 
