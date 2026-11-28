@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import PROVIDER_ENV_KEYS, read_secret_file, runtime_env_path
-from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import is_oauth_token_service
+from mindroom.credentials.service_names import validate_service_name
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import CREDENTIAL_SEEDS_FILE_ENV, CREDENTIAL_SEEDS_JSON_ENV
 

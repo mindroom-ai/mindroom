@@ -1,22 +1,19 @@
-"""Process-wide semantic embedder availability and active-client revision.
-
-The OpenAI-compatible and Vertex AI embedders record a failure here before
-raising and record healthy on every validated response, so recovery is self-clearing the
-moment a real embedding request succeeds. Probes cover the paths passive
-recording cannot see: startup, config reload, and subprocess knowledge
-refreshes that never touch the main-process embedder.
-"""
+"""Probe the configured semantic embedder at startup, after reloads, and after subprocess refreshes."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from threading import Lock
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend, memory_search
 from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, describe_embedder_error
+from mindroom.embeddings.health_state import (
+    EmbedderHealthRecorder,
+    capture_embedder_health_recorder,
+    get_embedder_failure,
+    reset_embedder_health_generation,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -28,66 +25,10 @@ logger = get_logger(__name__)
 
 _PROBE_TEXT = "mindroom embedder health check"
 
-_failure_lock = Lock()
-_current_failure: str | None = None
-# Bumped when a reload changes the active embedder or its use, so a slow
-# probe holding a pre-reload config snapshot cannot overwrite newer health.
-_health_generation = 0
-
-
-@dataclass(frozen=True)
-class EmbedderHealthRecorder:
-    """Generation-bound writer for embedding request outcomes."""
-
-    generation: int
-
-    def record(self, error: str | None) -> bool:
-        """Record an outcome only while this recorder is current."""
-        return _record_embedder_health_for_generation(self.generation, error)
-
-    def is_current(self) -> bool:
-        """Return whether this recorder still belongs to the active config."""
-        return self.generation == _health_generation_snapshot()
-
-
-def get_embedder_failure() -> str | None:
-    """Return the last recorded embedder failure, or None when healthy."""
-    with _failure_lock:
-        return _current_failure
-
-
-def _health_generation_snapshot() -> int:
-    with _failure_lock:
-        return _health_generation
-
-
-def capture_embedder_health_recorder() -> EmbedderHealthRecorder:
-    """Capture a writer that cannot mutate health after a config reload."""
-    return EmbedderHealthRecorder(_health_generation_snapshot())
-
-
-def _record_embedder_health_for_generation(generation: int, error: str | None) -> bool:
-    """Record a probe outcome unless the config generation moved on."""
-    global _current_failure
-    with _failure_lock:
-        if _health_generation != generation:
-            return False
-        _current_failure = error
-        return True
-
-
-def _reset_embedder_health_generation() -> EmbedderHealthRecorder:
-    """Clear recorded health and return a writer for the new generation."""
-    global _current_failure, _health_generation
-    with _failure_lock:
-        _health_generation += 1
-        _current_failure = None
-        return EmbedderHealthRecorder(_health_generation)
-
 
 def handle_embedder_credential_change(config: Config, runtime_paths: RuntimePaths) -> None:
     """Invalidate old writers and probe the replacement credential."""
-    health_recorder = _reset_embedder_health_generation()
+    health_recorder = reset_embedder_health_generation()
     create_background_task(
         check_embedder_health(
             config,
@@ -152,8 +93,7 @@ def probe_embedder(
     health_recorder: EmbedderHealthRecorder | None = None,
 ) -> str | None:
     """Run one strict embedding round-trip; return None when healthy."""
-    # Deferred to break the import cycle with the embedding factory and keep
-    # provider SDKs out of module import time.
+    # Load embedder construction and its provider integrations only when probing.
     from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
     try:
@@ -201,10 +141,23 @@ def handle_embedder_config_reload(current_config: Config, new_config: Config, ru
         current_config,
     ) == embedder_in_use(new_config):
         return
-    _reset_embedder_health_generation()
+    reset_embedder_health_generation()
     if not embedder_in_use(new_config):
         return
     create_background_task(
         check_embedder_health(new_config, runtime_paths, reason="config_reload"),
         name="embedder_reload_health_check",
     )
+
+
+__all__ = [
+    "EmbedderHealthRecorder",
+    "capture_embedder_health_recorder",
+    "check_embedder_health",
+    "embedder_in_use",
+    "get_embedder_failure",
+    "handle_embedder_config_reload",
+    "handle_embedder_credential_change",
+    "probe_embedder",
+    "semantic_embedder_configured",
+]
