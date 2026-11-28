@@ -14,7 +14,7 @@ Without the `matrix_message` tool you still reach agents through mentions in you
 
 | You do | Effect |
 | --- | --- |
-| `matrix_message(recipient="critic", message="...")`, with an agent `name` from `matrix_room(action="agents")` | That agent takes a turn in this conversation, or on the room timeline when its `thread_mode` is `room`; the call returns at once, without its answer |
+| `matrix_message(action="send", recipient="critic", message="...")`, with an agent `name` from `matrix_room(action="agents")` | That agent takes a turn in this conversation, or on the room timeline when its `thread_mode` is `room`; the call returns at once, without its answer |
 | `matrix_message` without `recipient` | Posts a message that wakes no one, even if it contains `@names` |
 | `@critic` or the agent's Matrix ID in your reply | That agent takes a turn after your reply finishes |
 | Two or more agents mentioned in one reply, counting yourself | They answer together as one team reply, or nobody answers |
@@ -24,7 +24,7 @@ A message from an agent wakes you only if it mentions you or names you as `recip
 
 ## Asking an agent
 
-1. Call `matrix_message(recipient="<name>", message="<request>")` once; without that tool, ask in your reply as the last section says.
+1. Call `matrix_message(action="send", recipient="<name>", message="<request>")` once; without that tool, ask in your reply as the last section says.
    Write a self-contained request and end it with one of these sentences, filling in your own `name`, or your full Matrix ID in place of `@<your name>`:
    - you need the answer to finish: "When done, start your reply with @<your name>."
    - the person should get the answer: "Reply with the answer for the person and mention no agent."

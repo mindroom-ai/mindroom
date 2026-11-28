@@ -954,7 +954,7 @@ async def test_a_contact_turn_reaches_its_room_only_through_the_message_policy(
     model = ScriptedModel(
         [
             calls(tool_call("browser_control", "call-1", action="navigate")),
-            calls(tool_call("matrix_message", "call-2", message="Bob is free on Friday.")),
+            calls(tool_call("matrix_message", "call-2", action="send", message="Bob is free on Friday.")),
             answer("Told Alice's agent Bob is free."),
         ],
     )

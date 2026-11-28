@@ -721,7 +721,7 @@ class MatrixRoomTools(Toolkit):
         Actions:
         - room_info: Room metadata + current thread_id, reply_to_event_id, requester_id, agent_name.
         - members: Joined members with display names and power levels.
-        - agents: Agents/teams available to this requester (name, matrix_user_id, description, thread_mode). Message via `matrix_message(recipient=name, message="...")` (separate from `run_subagent` allowlist).
+        - agents: Agents/teams available to this requester (name, matrix_user_id, description, thread_mode). Message via `matrix_message(action="send", recipient=name, message="...")` (separate from `run_subagent` allowlist).
         - threads: Paginated thread roots (`limit` default 20/max 50, `page_token` from `next_token`). `include_summaries=True` adds `summary`/`summary_pinned` (omitted when full history is unavailable; reads every thread—use only when needed). `workflow` labels rows (`needs_you`/`working`/`later`/`done`) and filters by `needs_you`, `working`, `later`, or `all` (use `workflow="all"` to include `done`): `needs_you` has `why` = `approval`|`question` (waiting on the requester; lead with these) or `your_turn` (idle: the requester's move, not yours); `later` has `back_at` (ms when known). Approximate: single runtime; filtered pages may be shorter than `limit`. `room_id="all"` spans all shared rooms (one page/room; pair with `workflow="needs_you"` for "what needs me?").
         - state: Without `event_type`, summary of all state events (`m.room.member` elided); `event_type` alone lists all events of that type with full `content`; `event_type` + `state_key` (including `""`) fetches one specific state event.
         """

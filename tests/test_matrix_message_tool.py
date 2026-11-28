@@ -407,6 +407,7 @@ async def test_matrix_message_unknown_room_is_reported_as_unknown(room_id: str) 
 @pytest.mark.parametrize(
     "kwargs",
     [
+        {"message": "hello"},
         {"action": "delete", "message": "hello"},
         {"action": "send", "message": "hello", "room_id": 123},
         {"action": "send", "message": "hello", "new_thread": "maybe"},
@@ -436,8 +437,8 @@ async def test_matrix_message_rejects_malformed_arguments(kwargs: dict[str, obje
 @pytest.mark.parametrize(
     ("kwargs", "expected_message"),
     [
-        ({"recipient": "  "}, "recipient must be a non-empty string when provided."),
-        ({"thread_id": ""}, "thread_id must be a non-empty string when provided."),
+        ({"action": "send", "recipient": "  "}, "recipient must be a non-empty string when provided."),
+        ({"action": "send", "thread_id": ""}, "thread_id must be a non-empty string when provided."),
         ({"action": "edit", "event_id": " "}, "event_id must be a non-empty string when provided."),
     ],
 )

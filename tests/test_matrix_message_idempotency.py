@@ -77,6 +77,7 @@ async def test_repeated_key_replays_first_event(
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="first",
                 recipient="general",
                 new_thread=True,
@@ -85,6 +86,7 @@ async def test_repeated_key_replays_first_event(
         )
         second = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 recipient="code",
                 idempotency_key="event-1",
@@ -108,6 +110,7 @@ async def test_a_replayed_threaded_send_does_not_resolve_its_thread_again(
         first, second = [
             json.loads(
                 await MatrixMessageTools().matrix_message(
+                    action="send",
                     message="into the thread",
                     thread_id="$reply-in-thread:localhost",
                     idempotency_key="threaded",
@@ -147,6 +150,7 @@ async def test_retry_after_uncertain_delivery_preserves_payload(
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="original @code",
                 recipient="general",
                 new_thread=True,
@@ -157,12 +161,13 @@ async def test_retry_after_uncertain_delivery_preserves_payload(
         assert len(transport.events) == 1
         if failure != "transport":
             still_unavailable = json.loads(
-                await MatrixMessageTools().matrix_message(message="changed", idempotency_key="retry"),
+                await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="retry"),
             )
             assert still_unavailable["status"] == "error"
         monkeypatch.setattr(durable, "write_json_file_durable", original_write)
         second = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 recipient="code",
                 thread_id="room",
@@ -185,7 +190,11 @@ async def test_concurrent_retries_have_one_transport_event(
     with tool_runtime_context(context):
         results = await asyncio.gather(
             *(
-                MatrixMessageTools().matrix_message(message=f"text {index}", idempotency_key="concurrent")
+                MatrixMessageTools().matrix_message(
+                    action="send",
+                    message=f"text {index}",
+                    idempotency_key="concurrent",
+                )
                 for index in range(6)
             ),
         )
@@ -204,9 +213,11 @@ async def test_changed_matrix_identity_fails_closed(
     """A different Matrix transaction scope must never acknowledge or resend a claim."""
     transport.lose_response = pending
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(message="first", idempotency_key="identity")
+        await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="identity")
         setattr(context.client, field, "changed")
-        result = json.loads(await MatrixMessageTools().matrix_message(message="retry", idempotency_key="identity"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="retry", idempotency_key="identity"),
+        )
     assert result["status"] == "error"
     assert "sender or device" in result["message"]
     assert len(transport.attempts) == 1
@@ -225,11 +236,18 @@ async def test_revoked_authority_is_rechecked_for_stored_target(
     config = context.config.model_copy(deep=True)
     live_context = replace(context, config_provider=lambda: config)
     with tool_runtime_context(live_context):
-        await MatrixMessageTools().matrix_message(message="first", recipient="code", idempotency_key="revoked")
+        await MatrixMessageTools().matrix_message(
+            action="send",
+            message="first",
+            recipient="code",
+            idempotency_key="revoked",
+        )
         access = config.agents["general" if revoke == "actor" else "code"].access
         assert access is not None
         access.users = []
-        result = json.loads(await MatrixMessageTools().matrix_message(message="retry", idempotency_key="revoked"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="retry", idempotency_key="revoked"),
+        )
     assert result["status"] == "error"
     assert len(transport.attempts) == 1
 
@@ -243,11 +261,18 @@ async def test_recipient_moved_to_another_account_fails_closed(
     """A retry never sends to or acknowledges a recipient whose name now belongs to another Matrix account."""
     transport.lose_response = pending
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(message="first", recipient="code", idempotency_key="moved")
+        await MatrixMessageTools().matrix_message(
+            action="send",
+            message="first",
+            recipient="code",
+            idempotency_key="moved",
+        )
         moved = entity_ids(context.config, context.runtime_paths, usernames={"code": "moved_code"})["code"]
         assert context.room is not None
         context.room.add_member(moved.full_id, "Code", None)
-        result = json.loads(await MatrixMessageTools().matrix_message(message="retry", idempotency_key="moved"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="retry", idempotency_key="moved"),
+        )
     assert result["status"] == "error"
     assert result["message"] == "The original Matrix recipient is no longer available."
     assert len(transport.attempts) == 1
@@ -257,9 +282,9 @@ async def test_requester_aliases_share_receipts(context: ToolRuntimeContext, tra
     """Canonical requester identity scopes receipts even across bridge aliases."""
     context.config.authorization.aliases = {"@alice:localhost": ["@bridge_alice:localhost"]}
     with tool_runtime_context(replace(context, requester_id="@bridge_alice:localhost")):
-        first = await MatrixMessageTools().matrix_message(message="first", idempotency_key="alias")
+        first = await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="alias")
     with tool_runtime_context(context):
-        second = await MatrixMessageTools().matrix_message(message="second", idempotency_key="alias")
+        second = await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="alias")
     assert first == second
     assert json.loads(first)["status"] == "ok"
     assert len(transport.events) == 1
@@ -276,9 +301,13 @@ async def test_completed_receipts_expire_but_pending_sends_do_not(
     now = time.time()
     transport.lose_response = pending
     with tool_runtime_context(context):
-        first = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="retention"))
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="retention"),
+        )
         monkeypatch.setattr(durable.time, "time", lambda: now + 9 * 86400)
-        second = json.loads(await MatrixMessageTools().matrix_message(message="second", idempotency_key="retention"))
+        second = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="retention"),
+        )
     assert second["status"] == "ok"
     assert len(transport.events) == (1 if pending else 2)
     if not pending:
@@ -294,14 +323,14 @@ async def test_completed_receipts_expire_but_pending_sends_do_not(
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"idempotency_key": ""},
-        {"idempotency_key": " "},
-        {"idempotency_key": "x" * 257},
+        {"action": "send", "idempotency_key": ""},
+        {"action": "send", "idempotency_key": " "},
+        {"action": "send", "idempotency_key": "x" * 257},
         {"action": "read", "idempotency_key": "key"},
         {"action": "edit", "event_id": "$event", "idempotency_key": "key"},
         {"action": "react", "event_id": "$event", "idempotency_key": "key"},
-        {"attachments": ["att_file"], "idempotency_key": "key"},
-        {"message": " ", "idempotency_key": "key"},
+        {"action": "send", "attachments": ["att_file"], "idempotency_key": "key"},
+        {"action": "send", "message": " ", "idempotency_key": "key"},
     ],
 )
 async def test_invalid_keyed_sends_never_send(
@@ -324,7 +353,12 @@ async def test_blank_attachments_keep_a_keyed_send_text_only(
     with tool_runtime_context(context):
         first, second = [
             json.loads(
-                await MatrixMessageTools().matrix_message(message="text", attachments=[" "], idempotency_key="key"),
+                await MatrixMessageTools().matrix_message(
+                    action="send",
+                    message="text",
+                    attachments=[" "],
+                    idempotency_key="key",
+                ),
             )
             for _ in range(2)
         ]
@@ -336,8 +370,8 @@ async def test_blank_attachments_keep_a_keyed_send_text_only(
 async def test_unkeyed_repeats_still_send_each_time(context: ToolRuntimeContext, transport: MatrixTransport) -> None:
     """Ordinary sends retain their existing non-idempotent behavior."""
     with tool_runtime_context(context):
-        first = json.loads(await MatrixMessageTools().matrix_message(message="same"))
-        second = json.loads(await MatrixMessageTools().matrix_message(message="same"))
+        first = json.loads(await MatrixMessageTools().matrix_message(action="send", message="same"))
+        second = json.loads(await MatrixMessageTools().matrix_message(action="send", message="same"))
     assert first["status"] == second["status"] == "ok"
     assert first["event_id"] != second["event_id"]
     assert len(transport.events) == 2
@@ -359,13 +393,17 @@ async def test_cancellation_after_acceptance_preserves_pending_send(
 
     cast("AsyncMock", context.client.room_send).side_effect = pause_response
     with tool_runtime_context(context):
-        pending = asyncio.create_task(MatrixMessageTools().matrix_message(message="first", idempotency_key="cancel"))
+        pending = asyncio.create_task(
+            MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="cancel"),
+        )
         await accepted.wait()
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
         cast("AsyncMock", context.client.room_send).side_effect = transport.room_send
-        receipt = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="cancel"))
+        receipt = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="cancel"),
+        )
     assert receipt["status"] == "ok"
     assert len(transport.events) == 1
     assert len(transport.attempts) == 2
@@ -398,8 +436,14 @@ async def test_room_alias_reuses_receipt(context: ToolRuntimeContext, transport:
     state.add_room("lobby", room_id=context.room_id, alias="#lobby:localhost", name="Lobby")
     save_matrix_state(state, context.runtime_paths)
     with tool_runtime_context(context):
-        first = await MatrixMessageTools().matrix_message(message="first", room_id="lobby", idempotency_key="room")
+        first = await MatrixMessageTools().matrix_message(
+            action="send",
+            message="first",
+            room_id="lobby",
+            idempotency_key="room",
+        )
         second = await MatrixMessageTools().matrix_message(
+            action="send",
             message="second",
             room_id=context.room_id,
             idempotency_key="room",
@@ -417,7 +461,9 @@ async def test_distinct_scopes_do_not_share_receipts(
 ) -> None:
     """The same opaque key must not conflate independent sending principals or rooms."""
     with tool_runtime_context(context):
-        first = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="scoped"))
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="scoped"),
+        )
     changed = context
     room_id = context.room_id
     if scope == "requester":
@@ -436,7 +482,12 @@ async def test_distinct_scopes_do_not_share_receipts(
         )
     with tool_runtime_context(changed):
         second = json.loads(
-            await MatrixMessageTools().matrix_message(message="second", room_id=room_id, idempotency_key="scoped"),
+            await MatrixMessageTools().matrix_message(
+                action="send",
+                message="second",
+                room_id=room_id,
+                idempotency_key="scoped",
+            ),
         )
     assert first["status"] == second["status"] == "ok"
     assert first["event_id"] != second["event_id"]
@@ -446,11 +497,13 @@ async def test_distinct_scopes_do_not_share_receipts(
 async def test_invalid_store_never_resends(context: ToolRuntimeContext, transport: MatrixTransport) -> None:
     """Unreadable persisted state cannot silently discard a prior identity."""
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(message="first", idempotency_key="corrupt")
+        await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="corrupt")
         root = context.runtime_paths.control_state_root
         assert root is not None
         next((root / "matrix_message_sends").glob("*.json")).write_text("not json")
-        receipt = json.loads(await MatrixMessageTools().matrix_message(message="second", idempotency_key="corrupt"))
+        receipt = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="corrupt"),
+        )
     assert receipt["status"] == "error"
     assert len(transport.attempts) == 1
 
@@ -468,6 +521,7 @@ async def test_recipient_mode_change_pauses_pending_thread(
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="first",
                 recipient="general",
                 new_thread=new_thread,
@@ -476,7 +530,7 @@ async def test_recipient_mode_change_pauses_pending_thread(
         )
         context.config.agents["general"].thread_mode = "room"
         receipt = json.loads(
-            await MatrixMessageTools().matrix_message(message="changed", idempotency_key="thread-mode"),
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="thread-mode"),
         )
         assert len(transport.attempts) == 1
         if pending:
@@ -486,7 +540,7 @@ async def test_recipient_mode_change_pauses_pending_thread(
             assert receipt == first
         context.config.agents["general"].thread_mode = "thread"
         recovered = json.loads(
-            await MatrixMessageTools().matrix_message(message="changed", idempotency_key="thread-mode"),
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="thread-mode"),
         )
     assert recovered["status"] == "ok"
     assert len(transport.events) == 1
@@ -510,7 +564,9 @@ async def test_alias_revocation_while_waiting_for_lock_fails_closed(
 
     monkeypatch.setattr(durable, "async_exclusive_file_lock", revoke_alias_after_lock)
     with tool_runtime_context(replace(context, requester_id="@bridge_alice:localhost")):
-        receipt = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="queued"))
+        receipt = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="queued"),
+        )
     assert receipt["status"] == "error"
     assert not transport.events
 
@@ -537,6 +593,7 @@ async def test_pending_write_uncertainty_prevents_retry_transport(
         for message in ("first", "changed", "changed again"):
             result = json.loads(
                 await MatrixMessageTools().matrix_message(
+                    action="send",
                     message=message,
                     idempotency_key="pending-fsync",
                 ),
@@ -548,6 +605,7 @@ async def test_pending_write_uncertainty_prevents_retry_transport(
         monkeypatch.setattr(durable, "write_json_file_durable", original_write)
         result = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="recovered",
                 idempotency_key="pending-fsync",
             ),
@@ -569,6 +627,7 @@ async def test_keyed_new_thread_with_title_replays_identically_without_duplicate
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="Ship release",
                 new_thread=True,
                 title="🚀 Ship",
@@ -577,6 +636,7 @@ async def test_keyed_new_thread_with_title_replays_identically_without_duplicate
         )
         second = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 idempotency_key="titled-1",
             ),
@@ -603,6 +663,7 @@ async def test_keyed_new_thread_with_title_recovers_after_lost_root_response(
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="Ship release",
                 new_thread=True,
                 title="🚀 Ship",
@@ -613,12 +674,14 @@ async def test_keyed_new_thread_with_title_recovers_after_lost_root_response(
         assert len(transport.events) == 1
         second = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 idempotency_key="titled-retry",
             ),
         )
         third = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed again",
                 idempotency_key="titled-retry",
             ),
@@ -645,7 +708,9 @@ async def test_receipt_store_accepts_v1_without_title_fields_and_rejects_orphan_
 ) -> None:
     """Existing v1 receipts lacking title keys replay cleanly, while orphan title_event_id fails closed."""
     with tool_runtime_context(context):
-        first = json.loads(await MatrixMessageTools().matrix_message(message="legacy", idempotency_key="v1-row"))
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="legacy", idempotency_key="v1-row"),
+        )
         state_path = _receipt_store_path(context)
         raw = json.loads(state_path.read_text(encoding="utf-8"))
         row = next(iter(raw["sends"].values()))
@@ -653,14 +718,18 @@ async def test_receipt_store_accepts_v1_without_title_fields_and_rejects_orphan_
         row.pop("title_event_id", None)
         state_path.write_text(json.dumps(raw), encoding="utf-8")
 
-        replayed = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="v1-row"))
+        replayed = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="v1-row"),
+        )
         assert replayed == first
         assert "title" not in replayed
         assert "title_event_id" not in replayed
 
         row["title_event_id"] = "$orphan_title"
         state_path.write_text(json.dumps(raw), encoding="utf-8")
-        corrupted = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="v1-row"))
+        corrupted = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="v1-row"),
+        )
     assert corrupted["status"] == "error"
     assert "invalid identity or delivery state" in corrupted["message"]
     assert len(transport.events) == 1
@@ -684,6 +753,7 @@ async def test_keyed_title_retry_deduplicates_after_lost_title_ack_and_record_fa
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="Ship release",
                 new_thread=True,
                 title="🚀 Ship",
@@ -699,12 +769,14 @@ async def test_keyed_title_retry_deduplicates_after_lost_title_ack_and_record_fa
         cast("AsyncMock", context.client.room_send).side_effect = transport.room_send
         second = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 idempotency_key="title-lost-ack",
             ),
         )
         third = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed again",
                 idempotency_key="title-lost-ack",
             ),
@@ -736,6 +808,7 @@ async def test_keyed_title_retry_deduplicates_after_lost_title_ack_and_record_fa
     with tool_runtime_context(context):
         first_rec = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="Deploy v2",
                 new_thread=True,
                 title="🚀 Deploy v2",
@@ -745,6 +818,7 @@ async def test_keyed_title_retry_deduplicates_after_lost_title_ack_and_record_fa
         assert failed_title_write is True
         second_rec = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 idempotency_key="title-record-fail",
             ),
@@ -752,6 +826,7 @@ async def test_keyed_title_retry_deduplicates_after_lost_title_ack_and_record_fa
         attempts_after_recovery = len(transport.attempts)
         third_rec = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed again",
                 idempotency_key="title-record-fail",
             ),
@@ -772,6 +847,7 @@ async def test_keyed_send_with_nested_markdown_title_normalizes_once(
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="Ship release",
                 new_thread=True,
                 title="**1. Deploy**",
@@ -780,6 +856,7 @@ async def test_keyed_send_with_nested_markdown_title_normalizes_once(
         )
         second = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 idempotency_key="nested-markdown-title",
             ),
@@ -802,14 +879,18 @@ async def test_untitled_receipts_omit_title_fields_for_v1_rollback_compatibility
     """Untitled keyed sends omit title and title_event_id from the persisted JSON receipt."""
     transport.lose_response = True
     with tool_runtime_context(context):
-        pending = json.loads(await MatrixMessageTools().matrix_message(message="plain", idempotency_key="untitled"))
+        pending = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="plain", idempotency_key="untitled"),
+        )
         assert pending["status"] == "error"
         state_path = _receipt_store_path(context)
         pending_row = next(iter(json.loads(state_path.read_text(encoding="utf-8"))["sends"].values()))
         assert "title" not in pending_row
         assert "title_event_id" not in pending_row
 
-        completed = json.loads(await MatrixMessageTools().matrix_message(message="plain", idempotency_key="untitled"))
+        completed = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="plain", idempotency_key="untitled"),
+        )
         assert completed["status"] == "ok"
         completed_row = next(iter(json.loads(state_path.read_text(encoding="utf-8"))["sends"].values()))
         assert "title" not in completed_row

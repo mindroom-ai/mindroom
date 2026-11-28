@@ -5,7 +5,10 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING
 
+import pytest
+
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
@@ -34,8 +37,12 @@ def test_matrix_message_schema_exposes_four_actions_and_eleven_arguments() -> No
         "idempotency_key",
     }
     assert properties["action"]["enum"] == ["send", "read", "edit", "react"]
-    assert function.parameters["required"] == []
+    assert "default" not in properties["action"]
+    assert function.parameters["required"] == ["action"]
     assert all(field["description"] for field in properties.values())
+    validate_tool_arguments(function, {"action": "send", "message": "hello"})
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(function, {"message": "hello"})
 
 
 def test_matrix_message_description_stays_compact() -> None:

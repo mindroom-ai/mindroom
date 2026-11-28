@@ -118,7 +118,7 @@ async def _message(config: Config, paths: RuntimePaths, actor: str) -> dict[str,
     if actor != "counterparty agent":
         return {}
     context = _context(config, paths)
-    sent = await _call(context, message="Are you free on Friday?", recipient="mind_bob")
+    sent = await _call(context, action="send", message="Are you free on Friday?", recipient="mind_bob")
     assert sent["status"] == "ok", sent
     [content] = _sent(context)
     return content

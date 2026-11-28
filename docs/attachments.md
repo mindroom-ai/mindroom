@@ -98,7 +98,7 @@ attachment(action="get", attachment_id="att_abc123", mindroom_output_path="incom
 view_file(path="plots/result.png")
 attachment(action="register", path="exports/report.csv")
 attachment(action="inline_image", path="plots/result.png", alt="Result")
-matrix_message(message="Here is the report.", attachments=["att_abc123", "exports/report.csv"])
+matrix_message(action="send", message="Here is the report.", attachments=["att_abc123", "exports/report.csv"])
 ```
 
 Attachment arguments must be `att_*` IDs available in the current conversation or registered earlier in the same tool run.
@@ -143,7 +143,7 @@ Only images with an `image/*` MIME type and a recognized image byte signature ar
 up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
 In encrypted rooms, MindRoom encrypts the upload (or reuses turn-scoped encrypted image media)
 and attaches decryption keys under `io.mindroom.inline_media` for each embedded image.
-When `attachment(action="inline_image", ...)` refuses, send the image through `matrix_message(attachments=[...])` instead.
+When `attachment(action="inline_image", ...)` refuses, send the image through `matrix_message(action="send", attachments=[...])` instead.
 
 ### Registering Local Files
 

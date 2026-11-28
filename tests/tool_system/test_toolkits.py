@@ -178,6 +178,43 @@ def test_catalog_function_names_follow_toolkit_scoping_rules() -> None:
     assert expected_exception_pairs - prefix_exceptions_in_use == set()
 
 
+_SNAKE_CASE_ACTION_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_READ_ONLY_OPTIONAL_ACTION_EXCEPTIONS = frozenset({("matrix_room", "matrix_room")})
+
+
+def _catalog_action_enums() -> list[tuple[str, str, str, dict[str, Any], dict[str, Any]]]:
+    entries: list[tuple[str, str, str, dict[str, Any], dict[str, Any]]] = []
+    for catalog_name, catalog in (("schemas.json", SCHEMAS), ("schemas_all_enabled.json", ALL_ENABLED_SCHEMAS)):
+        for toolkit_name, entry in catalog.items():
+            for function in entry["functions"]:
+                parameters = function.get("parameters", {})
+                action_prop = parameters.get("properties", {}).get("action")
+                if isinstance(action_prop, dict) and "enum" in action_prop:
+                    entries.append((catalog_name, toolkit_name, function["name"], parameters, action_prop))
+    return entries
+
+
+def test_catalog_action_enums_are_snake_case() -> None:
+    """Every built-in `action` enum value must be `snake_case`."""
+    invalid = [
+        (catalog_name, toolkit_name, function_name, value)
+        for catalog_name, toolkit_name, function_name, _parameters, action_prop in _catalog_action_enums()
+        for value in action_prop["enum"]
+        if not isinstance(value, str) or not _SNAKE_CASE_ACTION_RE.fullmatch(value)
+    ]
+    assert invalid == []
+
+
+def test_catalog_action_enums_are_required() -> None:
+    """Every built-in `action` enum must be required unless explicitly allowlisted as read-only."""
+    optional_or_defaulted = {
+        (toolkit_name, function_name)
+        for _catalog_name, toolkit_name, function_name, parameters, action_prop in _catalog_action_enums()
+        if "action" not in parameters.get("required", []) or "default" in action_prop
+    }
+    assert optional_or_defaulted == _READ_ONLY_OPTIONAL_ACTION_EXCEPTIONS
+
+
 @pytest.mark.parametrize("tool_name", sorted(SCHEMAS))
 def test_adapted_tool_matches_golden(tool_name: str, golden_runtime: tuple[Path, Config, RuntimePaths]) -> None:
     """Each registered tool adapts to the golden functions, in the order it offers them, with golden instructions."""

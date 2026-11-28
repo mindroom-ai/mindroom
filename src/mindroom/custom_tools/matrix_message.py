@@ -131,7 +131,7 @@ class MatrixMessageTools(Toolkit):
 
     async def matrix_message(  # noqa: C901, PLR0911, PLR0912
         self,
-        action: Literal["send", "read", "edit", "react"] = "send",
+        action: Literal["send", "read", "edit", "react"],
         message: str | None = None,
         recipient: str | None = None,
         room_id: str | None = None,

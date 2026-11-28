@@ -21,13 +21,14 @@ agents:
 
 ```python
 # Post an update in the current conversation.
-matrix_message(message="The checks passed.")
+matrix_message(action="send", message="The checks passed.")
 
 # Ask another agent to respond in the current conversation.
-matrix_message(recipient="code", message="Review the failing check.")
+matrix_message(action="send", recipient="code", message="Review the failing check.")
 
 # Start a separate conversation with an immediately pinned title; keep the returned thread_id.
 matrix_message(
+    action="send",
     recipient="code",
     message="Investigate the regression.",
     new_thread=True,
@@ -36,10 +37,10 @@ matrix_message(
 
 # Read or continue that conversation later.
 matrix_message(action="read", thread_id="$returned-root")
-matrix_message(recipient="code", message="Also check the retry path.", thread_id="$returned-root")
+matrix_message(action="send", recipient="code", message="Also check the retry path.", thread_id="$returned-root")
 
 # Send files in their listed order.
-matrix_message(message="Results", attachments=["reports/results.txt", "att_screenshot"])
+matrix_message(action="send", message="Results", attachments=["reports/results.txt", "att_screenshot"])
 
 # Edit a message you sent, or react to a message.
 matrix_message(action="edit", event_id="$message", message="Corrected results")
@@ -94,7 +95,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 
 | Argument | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `action` | `"send" \| "read" \| "edit" \| "react"` | `"send"` | Message operation. |
+| `action` | `"send" \| "read" \| "edit" \| "react"` | required | Message operation. |
 | `message` | `str \| None` | `None` | Text for send/edit; emoji for react, defaulting to 👍. |
 | `recipient` | `str \| None` | `None` | Available agent or team name to request a response from; send only. |
 | `room_id` | `str \| None` | `None` | Matrix room ID, alias, or configured room name; current room by default. |
@@ -136,7 +137,7 @@ If delivery fails partway, the error result still lists the files that arrived, 
 Pass `idempotency_key` on a text-only `send` so that retrying after a timeout or lost tool result never posts a duplicate.
 
 ```python
-matrix_message(message="Review this result.", recipient="code", new_thread=True, idempotency_key="review-42")
+matrix_message(action="send", message="Review this result.", recipient="code", new_thread=True, idempotency_key="review-42")
 ```
 
 A key is scoped to the requester, the sending agent, and the destination room; using it in another room creates a separate send.
