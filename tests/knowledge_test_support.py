@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 import mindroom.knowledge.manager as knowledge_manager
-import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
+import mindroom.knowledge.refresh_worker as knowledge_refresh_worker
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -20,7 +20,7 @@ from mindroom.config.main import Config
 from mindroom.knowledge.collections import open_collection
 from mindroom.knowledge.index_metadata import load_publication, new_publication, save_publication
 from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
-from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding
+from mindroom.knowledge.refresh_worker import _refresh_knowledge_binding
 from mindroom.knowledge.registry import published_index_storage_path
 from mindroom.knowledge.vector_store import CollectionMeta, StoredRow
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bind_runtime_paths, test_runtime_paths
@@ -178,7 +178,7 @@ async def run_refresh_child_in_process(
             force_reindex=force_reindex,
         )
     except Exception as exc:
-        return knowledge_refresh_runner._failed_child_result(exc)
+        return knowledge_refresh_worker._failed_child_result(exc)
 
 
 def _config(

@@ -56,7 +56,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.embeddings.factory"
 depends_on = [
-    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.health_state",
     "mindroom.embeddings.ollama_embedder",
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.sentence_transformers_embedder",
@@ -91,9 +91,21 @@ path = "mindroom.embeddings.embedder_health"
 depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
+    "mindroom.embeddings.health_state",
     "mindroom.embeddings.openai_embedder",
     "mindroom.embeddings.vertex_ai_embedder",
     "mindroom.config.resolution",
+]
+
+[[modules]]
+path = "mindroom.embeddings.health_state"
+depends_on = []
+visibility = [
+    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.factory",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_scheduler",
+    "mindroom.memory._mem0_backend",
 ]
 
 [[modules]]
@@ -997,7 +1009,6 @@ depends_on = [
 path = "mindroom.session_storage.agent_storage"
 depends_on = [
     "mindroom.history.types",
-    "mindroom.llm",
     "mindroom.runtime_resolution",
     "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.session_storage.legacy_session_columns",
@@ -1009,7 +1020,6 @@ visibility = [
     "mindroom.helper_usage",
     "mindroom.approval.execution",
     "mindroom.history.session_context",
-    "mindroom.history.storage",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.memory.auto_flush",
     "mindroom.delegation.execution",
@@ -1144,7 +1154,6 @@ path = "mindroom.session_storage.legacy_agno3_conversion"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.legacy_stored_tool_calls",
-    "mindroom.history.storage",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.session_storage.codec",
@@ -1210,6 +1219,7 @@ expose = [
     "persist_to",
     "report_created_row",
     "runs_without",
+    "save_compaction_usage",
     "seen_event_ids",
     "set_visible_messages",
     "source_event_ids",
@@ -1934,6 +1944,7 @@ depends_on = [
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_worker",
     "mindroom.knowledge.status",
 ]
 
@@ -3660,11 +3671,9 @@ visibility = [
 [[modules]]
 path = "mindroom.history.storage"
 depends_on = [
-    "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.session_storage.summary_rows",
-    "mindroom.constants",
     "mindroom.history.run_visibility",
     "mindroom.history.types",
     "mindroom.session_storage.types",
@@ -3677,7 +3686,7 @@ visibility = ["mindroom.session_storage.legacy_compaction_state", "mindroom.sess
 
 [[modules]]
 path = "mindroom.history.types"
-depends_on = []
+depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.history.interrupted_replay"
@@ -4666,7 +4675,7 @@ visibility = ["mindroom.memory._file_backend"]
 [[modules]]
 path = "mindroom.memory._mem0_backend"
 depends_on = [
-    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.health_state",
     "mindroom.embeddings.errors",
     "mindroom.helper_usage",
     "mindroom.memory._mem0_usage",
@@ -7540,6 +7549,7 @@ visibility = [
     "mindroom.egress_broker",
     "mindroom.knowledge.git_source",
     "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_worker",
 ]
 
 [[modules]]
@@ -7618,7 +7628,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
-    "mindroom.embeddings.embedder_health",
+    "mindroom.embeddings.health_state",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
 ]
@@ -7628,11 +7638,12 @@ path = "mindroom.knowledge.refresh_locks"
 depends_on = []
 visibility = [
     "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.refresh_worker",
 ]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_entrypoint"
-depends_on = ["mindroom.knowledge.refresh_runner"]
+depends_on = ["mindroom.knowledge.refresh_worker"]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_runner"
@@ -7640,17 +7651,32 @@ depends_on = [
     "mindroom.knowledge.file_listing",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
-    "mindroom.config.main",
+    "mindroom.embeddings.health_state",
     "mindroom.constants",
     "mindroom.github_app_auth",
     "mindroom.knowledge.index_metadata",
-    "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_outcome",
     "mindroom.knowledge.registry",
     "mindroom.tool_system.worker_routing",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.refresh_worker"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.constants",
+    "mindroom.github_app_auth",
+    "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.manager",
+    "mindroom.knowledge.redaction",
+    "mindroom.knowledge.refresh_locks",
+    "mindroom.knowledge.refresh_runner",
+    "mindroom.knowledge.registry",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.api.knowledge", "mindroom.knowledge.refresh_entrypoint"]
 
 [[modules]]
 path = "mindroom.knowledge.refresh_policy"
@@ -7757,7 +7783,6 @@ expose = [
     "create_session_storage",
     "create_state_storage",
     "prepare_conversation_database",
-    "save_compaction_usage",
 ]
 from = ["mindroom.session_storage.agent_storage"]
 
@@ -11233,13 +11258,22 @@ path = "mindroom.knowledge_graph.clients"
 depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.helper_usage",
-    "mindroom.knowledge_graph.store",
+    "mindroom.knowledge_graph.async_support",
     "mindroom.knowledge_graph.usage",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.session_storage.agent_storage",
 ]
 visibility = ["mindroom.knowledge_graph.store"]
+
+[[modules]]
+path = "mindroom.knowledge_graph.async_support"
+depends_on = []
+visibility = [
+    "mindroom.knowledge_graph.clients",
+    "mindroom.knowledge_graph.ingestion",
+    "mindroom.knowledge_graph.store",
+]
 
 [[modules]]
 path = "mindroom.knowledge_graph.scope"
@@ -11253,6 +11287,7 @@ path = "mindroom.knowledge_graph.store"
 depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.entity_resolution",
+    "mindroom.knowledge_graph.async_support",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.embedded_server",
     "mindroom.knowledge_graph.extraction",
@@ -11298,6 +11333,7 @@ depends_on = [
     "mindroom.contacts.turns",
     "mindroom.entity_resolution",
     "mindroom.history.session_runs",
+    "mindroom.knowledge_graph.async_support",
     "mindroom.knowledge_graph.episodes",
     "mindroom.knowledge_graph.legacy_ingestion",
     "mindroom.knowledge_graph.names",

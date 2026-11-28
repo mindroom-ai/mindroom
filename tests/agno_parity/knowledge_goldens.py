@@ -31,7 +31,7 @@ from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.knowledge.index_metadata import load_publication
-from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding
+from mindroom.knowledge.refresh_worker import _refresh_knowledge_binding
 from mindroom.knowledge.registry import published_index_storage_path, resolve_published_index_key
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call

@@ -19,8 +19,8 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.knowledge_graph import clients
+from mindroom.knowledge_graph.async_support import UnusableExtractionError
 from mindroom.knowledge_graph.clients import MindRoomEmbedder, MindRoomLLMClient, UnusedCrossEncoder
-from mindroom.knowledge_graph.store import UnusableExtractionError
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
 from mindroom.llm.errors import ProviderError
 from mindroom.providers import registry as provider_registry

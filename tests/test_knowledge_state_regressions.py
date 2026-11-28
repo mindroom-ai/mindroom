@@ -24,7 +24,7 @@ from mindroom.config.memory import MemorySearchConfig
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile
 from mindroom.knowledge.index_metadata import Publication, load_publication, save_publication
-from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
+from mindroom.knowledge.refresh_worker import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
     mark_knowledge_source_changed_async,
