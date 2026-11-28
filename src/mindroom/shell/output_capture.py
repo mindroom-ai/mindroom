@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import uuid
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -19,6 +20,7 @@ from mindroom.shell.background_log import sweep_generated_output
 from mindroom.shell.output import SpoolCapture, format_shell_completion
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import BinaryIO
 
     from mindroom.shell.output import ShellOutputBuffer
@@ -28,9 +30,9 @@ _SPILL_NAME = re.compile(r"shell-spill-[0-9a-f]{32}\.txt")
 _SPILL_INSPECT = " (inspect in parts with read_file offset/limit or grep/sed)."
 _SPILL_STDERR_HEADER = b"Stderr:\n"
 _SPILL_HINT_PATH = re.compile(
-    r"^(?P<notice>\[[^\n]*?(?:Full output|First (?P<limit>[0-9]+ (?:MiB|bytes))) saved to )?"
-    rf"(?P<path>(?:/(?:[^\n]*/)?)?{_SPILL_DIRECTORY}/(?P<name>{_SPILL_NAME.pattern}))"
-    rf"(?(notice)(?:{re.escape(_SPILL_INSPECT)})?\])$",
+    r"^\[[^\n]*?(?:Full output|First (?P<limit>[0-9]+ (?:MiB|bytes))) saved to "
+    rf"(?P<path>(?:[^\n]*/)?{_SPILL_DIRECTORY}/(?P<name>{_SPILL_NAME.pattern}))"
+    rf"(?:{re.escape(_SPILL_INSPECT)})?\]$",
     re.MULTILINE,
 )
 _SPILL_STATUS = re.compile(r"(?:Exit code -?[0-9]+|Stopped after [0-9.e+]+s\.)")
@@ -192,6 +194,10 @@ class ShellSpillPolicy:
         raise ValueError(msg)
 
 
+def _utf8_size(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
 @dataclass(frozen=True)
 class PublishedShellSpill:
     """A saved file whose receipt takes priority over output when bounding the inline preview."""
@@ -210,22 +216,30 @@ class PublishedShellSpill:
         prefix = f"First {self.truncated_at}" if self.truncated_at else "Full output"
         return f"{prefix} saved to {self.path}"
 
-    def bound_preview(self, message: str, *, status: str = "") -> str:
-        """Budget the UTF-8 tail after the status and the one spill link."""
-        if len(message.encode("utf-8")) <= self.threshold:
+    def bound_preview(
+        self,
+        message: str,
+        *,
+        status: str = "",
+        measure: Callable[[str], int] = _utf8_size,
+    ) -> str:
+        """Keep the status and spill receipt, then fit as much of the tail as the byte budget allows."""
+        if measure(message) <= self.threshold:
             return message
         prefix = f"{status}\n" if status else ""
         header = f"{prefix}[Inline preview clipped. {self.hint}]"
-        room = self.threshold - len(header.encode("utf-8"))
+        room = self.threshold - measure(header)
         if room <= 0:
-            summary = f"{prefix}[{self._summary}]"
-            if len(summary.encode("utf-8")) <= self.threshold:
-                return summary
-            # A user can set a threshold smaller than the path itself. Keep the minimal receipt, never payload.
-            return f"{prefix}{self.path}"
-        output = message.removeprefix(prefix).replace(f" {self.hint}]", "]", 1).encode("utf-8")
-        tail = output[-(room - 1) :].decode("utf-8", errors="ignore") if room > 1 else ""
-        return f"{header}\n{tail}" if tail else header
+            # The labeled receipt is mandatory, even for a budget smaller than the path itself.
+            return f"{prefix}[{self._summary}]"
+        output = message.removeprefix(prefix).replace(f" {self.hint}]", "]", 1)
+        # Both UTF-8 and JSON use at least one byte per character. Search for the longest whole-character suffix.
+        count = bisect_right(
+            range(1, min(len(output), room) + 1),
+            self.threshold,
+            key=lambda length: measure(f"{header}\n{output[-length:]}"),
+        )
+        return f"{header}\n{output[-count:]}" if count else header
 
 
 class ShellOutputSpill:
@@ -346,16 +360,24 @@ def format_named_shell_spill(
     auto_save_threshold_bytes: int,
 ) -> str | None:
     """Budget the preview again after a named worker adds its header and workspace path prefix."""
-    first_line, _, rest = text.partition("\n")
-    status = first_line if _SPILL_STATUS.fullmatch(first_line) else ""
-    bare_receipt = rest if status else text
-    for match in _SPILL_HINT_PATH.finditer(text):
-        if match["notice"] is not None or match["path"] == bare_receipt:
-            break
-    else:
+    if (match := _SPILL_HINT_PATH.search(text)) is None:
         return None
+    first_line = text.partition("\n")[0]
+    status = first_line if _SPILL_STATUS.fullmatch(first_line) else ""
     path = Path(mount_dir, _SPILL_DIRECTORY, match["name"]) if mount_dir is not None else Path(match["path"])
     text = f"{text[: match.start('path')]}{path}{text[match.end('path') :]}"
     receipt = PublishedShellSpill(path, auto_save_threshold_bytes, match["limit"])
     leading = f"{worker_header}\n{status}" if status else worker_header
     return receipt.bound_preview(f"{worker_header}\n{text}", status=leading)
+
+
+def bound_shell_spill_preview(text: str, *, max_bytes: int, measure: Callable[[str], int]) -> str | None:
+    """Return a labeled spill result fitted to the caller's encoding, or None for ordinary output."""
+    if (match := _SPILL_HINT_PATH.search(text)) is None:
+        return None
+    first_line, _, rest = text.partition("\n")
+    worker = first_line if first_line.startswith("[worker: ") and first_line.endswith("]") else ""
+    status = rest.partition("\n")[0] if worker else first_line
+    leading = "\n".join(line for line in (worker, status if _SPILL_STATUS.fullmatch(status) else "") if line)
+    receipt = PublishedShellSpill(Path(match["path"]), max_bytes, match["limit"])
+    return receipt.bound_preview(text, status=leading, measure=measure)

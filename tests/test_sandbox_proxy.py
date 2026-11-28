@@ -967,6 +967,18 @@ def test_named_worker_rewrites_only_the_spill_hint_in_an_unstructured_writable_m
         assert display(writable) == replace(failure, content=unchanged)
 
 
+def test_named_worker_does_not_rewrite_bare_spill_paths_in_command_output() -> None:
+    """A command can print an artifact name without that ordinary text becoming a receipt."""
+    path = f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt"
+    header = "[worker: build]"
+    result = sandbox_proxy_module._format_named_worker_result(
+        path,
+        header=header,
+        admitted_sandbox=WorkerSandboxConfig(mount_dir="jobs/build"),
+    )
+    assert result == f"{header}\n{path}"
+
+
 def test_named_worker_budgets_the_spill_preview_after_rewriting_its_path() -> None:
     """Routing adds bytes; the final result still keeps its status and mount-relative link within budget."""
     relative = f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt"

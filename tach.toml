@@ -359,6 +359,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.agent_cli.projection"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.shell.output_capture",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.tool_function",
     "mindroom.llm",
@@ -523,6 +525,7 @@ visibility = [
     "mindroom.delegation.personas",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
+    "mindroom.agent_cli.projection",
     "mindroom.tailnet_ssh.links",
     "mindroom.terminal.client",
     "mindroom.approval.tool_approval",
@@ -13719,6 +13722,7 @@ depends_on = [
     "mindroom.tool_system.output_files",
 ]
 visibility = [
+    "mindroom.agent_cli.projection",
     "mindroom.custom_tools.desktop_shell",
     "mindroom.shell.runner",
     "mindroom.shell.supervisor",

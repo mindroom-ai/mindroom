@@ -20,6 +20,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
+from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.shell.background_log import BackgroundLogPolicy, open_background_log
 from mindroom.shell.background_scope import shell_background_scope
 from mindroom.shell.output import (
@@ -54,6 +55,7 @@ from mindroom.tool_system.tool_environment import ToolEnvironment, collected_too
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.tools.shell import (
+    _shell_output_policies,
     _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
     shell_tools,
@@ -1386,6 +1388,28 @@ async def test_scope_exit_stops_running_process_group_and_writes_trailer(tmp_pat
     assert "[MindRoom: stopped when turn ended]" in log_text
 
 
+@pytest.mark.parametrize("max_bytes", [MAX_READ_BYTES // 2, 2 * MAX_READ_BYTES])
+def test_only_implicit_shell_spills_are_limited_to_the_workspace_read_cap(tmp_path: Path, max_bytes: int) -> None:
+    """Implicit spills stay readable; callers of explicit output redirects keep their configured cap."""
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=max_bytes)
+    for path in (None, "explicit.txt"):
+        request = prepare_tool_output_file(policy, tool_name="run_shell_command", output_path=path)
+        assert not isinstance(request, dict)
+        token = _active_output_request.set(request)
+        try:
+            destination, spill = _shell_output_policies(allow_spill=True)
+        finally:
+            _active_output_request.reset(token)
+        if path is None:
+            assert destination is None
+            assert spill is not None
+            assert spill.max_bytes == min(max_bytes, MAX_READ_BYTES)
+        else:
+            assert spill is None
+            assert destination is not None
+            assert destination.max_bytes == max_bytes
+
+
 @pytest.mark.asyncio
 async def test_auto_background_with_output_path_returns_handled_and_leaves_target_untouched(tmp_path: Path) -> None:
     """Auto-backgrounding closes output capture without writing or overwriting mindroom_output_path."""
@@ -1808,7 +1832,8 @@ async def test_read_stream_paces_only_capped_bursts_without_active_capture(tmp_p
         policy = ShellSpillPolicy(str(tmp_path), 1024, auto_save_threshold_bytes=512)
         with contextlib.closing(ShellOutputSpill(policy, buffer, ShellOutputBuffer())) as spill:
             await drain_text_stream(make_stream(one_burst), buffer, extra_sinks=[spill.append])
-            assert (pace_calls, spill.publish() is not None) == (1, True)
+            assert pace_calls == 1
+            assert await spill.publish() is not None
 
         overflow = SpoolStream(max_bytes=10, directory=str(tmp_path))
         await drain_text_stream(make_stream(one_burst), ShellOutputBuffer(max_bytes=8), overflow)

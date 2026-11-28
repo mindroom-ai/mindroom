@@ -45,6 +45,7 @@ tool_approval:
 `rules[].arguments` checks the same supplied top-level arguments that `script` rules receive (after call decoding, before tool defaults are filled in, so omitted arguments with defaults do not match).
 String matchers use case-sensitive globs, booleans, numbers, and `null` use strict equality (`true` never matches `1`, and `false` never matches `0`), a list matches if any element matches, and multiple keys combine with AND.
 Prefer fail-closed allowlisting (`auto_approve` specific safe argument values, followed by a fallback `require_approval` rule) over denylisting dangerous values under `default: auto_approve`, because omitted defaults and path or formatting variations (where `*` matches `/`) can bypass a denylist rule.
+An `auto_approve` rule that matches `run_shell_command` by `args` only covers the default working directory unless the rule also matches `workdir`.
 Avoid glob allowlists on shell commands or free-text arguments (for example, `command: "git status*"` also matches `git status; rm -rf ~`); use a `script` rule when you need to parse, normalize, or denylist argument values.
 
 [`config_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#config_manager) calls that only read configuration, `manage_config(operation="inspect")` and `manage_agent(operation="validate")`, never ask for approval, even when a rule matches them or `default` is `require_approval`.

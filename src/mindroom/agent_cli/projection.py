@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.attachments.storage import register_local_attachment
 from mindroom.llm.media import File
+from mindroom.shell.output_capture import bound_shell_spill_preview
 from mindroom.tool_system.output_files import (
     ToolOutputFileRequest,
     finalize_tool_output_file,
@@ -36,6 +38,10 @@ def project_cli_result(result: object, policy: ToolOutputFilePolicy, tool_name: 
     """Save large text through the normal output policy without changing execution status."""
     # ToolExecution already separated media. Don't save an existing receipt as another output file.
     threshold = min(policy.auto_save_threshold_bytes, _INLINE_BUDGET)
+    if tool_name == SHELL_FUNCTION and isinstance(result, str):
+        spill_preview = bound_shell_spill_preview(result, max_bytes=threshold, measure=_encoded_size)
+        if spill_preview is not None:
+            return spill_preview
     if isinstance(result, str) and _encoded_size(result) > _INLINE_BUDGET:
         threshold = 0
     bounded = replace(policy, auto_save_threshold_bytes=threshold)

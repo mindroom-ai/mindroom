@@ -21,7 +21,7 @@ from mindroom.constants import (
     subprocess_path_with_prepends,
     workspace_home_identity_env,
 )
-from mindroom.path_confinement import resolve_path_within_root
+from mindroom.path_confinement import MAX_READ_BYTES, resolve_path_within_root
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHELL_NON_INTERACTIVE_ENV_DEFAULTS,
@@ -335,7 +335,7 @@ def _shell_output_policies(*, allow_spill: bool) -> tuple[ShellOutputDestination
     if allow_spill and not structured_result_requested():
         return None, ShellSpillPolicy(
             root,
-            policy.max_bytes,
+            min(policy.max_bytes, MAX_READ_BYTES),
             policy.auto_save_threshold_bytes,
             policy.tools_use_workdir,
         )

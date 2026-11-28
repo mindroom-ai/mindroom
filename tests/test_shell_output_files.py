@@ -20,13 +20,20 @@ from typing import TYPE_CHECKING, BinaryIO
 
 import pytest
 
+from mindroom.agent_cli.projection import _INLINE_BUDGET, project_cli_result
 from mindroom.api import sandbox_runner
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_MAX_BYTES, resolve_runtime_paths
 from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.shell import output_capture
 from mindroom.shell.background_scope import shell_background_scope
 from mindroom.shell.output import ShellOutputBuffer, SpoolCapture
-from mindroom.shell.output_capture import ShellOutputDestination, ShellOutputSpill, ShellSpillPolicy
+from mindroom.shell.output_capture import (
+    PublishedShellSpill,
+    ShellOutputDestination,
+    ShellOutputSpill,
+    ShellSpillPolicy,
+    format_named_shell_spill,
+)
 from mindroom.shell.registry import ProcessRegistry
 from mindroom.shell.runner import ActiveCommand, run_foreground
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
@@ -916,6 +923,65 @@ async def test_two_hard_capped_lines_share_one_bounded_inline_preview(
     assert len(value.encode("utf-8")) <= budget
     assert value.endswith("雪" * 40)
     assert saved.read_text() == "é" * 31000 + "\nStderr:\n" + "雪" * 21000 + "\n"
+
+
+def test_tiny_spill_receipt_keeps_its_label_and_can_still_be_routed() -> None:
+    """When only the mandatory receipt fits, retain the label so a worker can translate the path."""
+    path = Path(f"mindroom_tool_outputs/shell-spill-{'a' * 32}.txt")
+    status = "Exit code 7"
+    spill = PublishedShellSpill(path, threshold=1, truncated_at="64 MiB")
+    receipt = spill.bound_preview(f"{status}\n{'x' * 500}", status=status)
+    assert receipt == f"{status}\n[First 64 MiB saved to {path}]"
+    assert (
+        format_named_shell_spill(
+            receipt,
+            worker_header="[worker: build]",
+            mount_dir="jobs/build",
+            auto_save_threshold_bytes=1,
+        )
+        == f"[worker: build]\n{status}\n[First 64 MiB saved to jobs/build/{path}]"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("named", [False, True], ids=["workspace", "named-mount"])
+async def test_cli_shortens_a_published_shell_spill_without_saving_another_file(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+    named: bool,
+) -> None:
+    """The actual shell spill survives CLI JSON-encoding and remains the only saved artifact."""
+    mount = "jobs/build"
+    root = tmp_path / mount if named else tmp_path
+    root.mkdir(parents=True, exist_ok=True)
+    configure_toolkit_functions(shell_toolkit, output_files=ToolOutputFilePolicy(root))
+    script = "import sys; print((chr(1) + 'é') * 20000); sys.exit(7)"
+    value = (await _run(shell_toolkit, {"args": [sys.executable, "-c", script], "timeout": 10})).result
+    assert isinstance(value, ToolOutcome)
+    prefix = "Exit code 7\n"
+    text = value.content
+    if named:
+        routed = format_named_shell_spill(
+            text,
+            worker_header="[worker: build]",
+            mount_dir=mount,
+            auto_save_threshold_bytes=40_000,
+        )
+        assert routed is not None
+        text = routed
+        prefix = "[worker: build]\n" + prefix
+    assert len(json.dumps(text, ensure_ascii=False).encode()) > _INLINE_BUDGET
+
+    result = project_cli_result(text, ToolOutputFilePolicy(tmp_path), "run_shell_command")
+
+    assert isinstance(result, str)
+    assert result.startswith(prefix)
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= _INLINE_BUDGET
+    assert "\x01é" in result
+    [directory] = tmp_path.rglob("mindroom_tool_outputs")
+    [saved] = directory.iterdir()
+    assert f"Full output saved to {saved.relative_to(tmp_path)}" in result
+    assert saved.read_text() == "\x01é" * 20000 + "\n"
 
 
 _LARGE_OUTPUT = "print('x' * 52000, flush=True)"
