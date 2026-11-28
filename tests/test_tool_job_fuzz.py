@@ -76,10 +76,12 @@ class JobLifecycles(RuleBasedStateMachine):
         self._run(self.runner.step(Action(kind, job, **options)))  # type: ignore[arg-type]
 
     def _slots(self, *statuses: str) -> list[int]:
+        if not statuses:
+            return sorted(int(job_id.removeprefix("job")) for job_id in self.runner.jobs)
         return [
             int(job_id.removeprefix("job"))
             for job_id, entry in sorted(self.runner.runtime._entries.items())
-            if not statuses or entry.job.status in statuses
+            if entry.job.status in statuses
         ]
 
     def _target(self, data: st.DataObject, *statuses: str) -> int:

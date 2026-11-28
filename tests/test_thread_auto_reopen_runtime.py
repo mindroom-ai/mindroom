@@ -39,7 +39,11 @@ from mindroom.thread_tags import (
     ThreadTagsState,
     _thread_tag_state_key,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeContext,
+    tool_runtime_context,
+    tool_runtime_model_context,
+)
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -404,7 +408,8 @@ async def test_thread_resolution_move_and_streaming_stamping(tmp_path: Path) -> 
         patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock(return_value=empty)),
         tool_runtime_context(ctx),
     ):
-        assert json.loads(await ThreadResolutionTools().thread_resolution(action="resolve"))["status"] == "ok"
+        with tool_runtime_model_context("default"):
+            assert json.loads(await ThreadResolutionTools().thread_resolution(action="resolve"))["status"] == "ok"
         assert ROOT in ctx.resolved_thread_ids
         streaming = StreamingResponse(
             target=ctx.target,

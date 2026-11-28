@@ -24,7 +24,15 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON, ToolJobSnapshotUpdate
+from mindroom.event_journal import (
+    JOB_ENDED_REASON,
+    REPLY_STOPPED_REASON,
+    TERMINAL_STATUSES,
+    ToolJobExistsError,
+    ToolJobSnapshotUpdate,
+    is_workflow_node_payload,
+    job_delegation_id_from_payload,
+)
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.shell.background_scope import bind_shell_background_scope
@@ -53,8 +61,6 @@ if TYPE_CHECKING:
 type _OutcomeStatus = Literal["completed", "failed", "cancelled", "denied", "interrupted"]
 # A running job that waits for human decisions on the approval cards it posted is `awaiting_approval`.
 type _BackgroundStatus = Literal["running", "awaiting_approval", "cancel_requested"] | _OutcomeStatus
-# Statuses after which execution has ended for good, with an outcome a reply can retrieve.
-TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
 
 
 def call_job_id(owner: ToolExecutionIdentity, run_id: str, call_id: str) -> str:
@@ -197,8 +203,7 @@ def is_workflow_node_job(job: BackgroundJob) -> bool:
     Such a job is no job of its own to anyone: it is in no list, no room state, no follow-up turn and no notice,
     also when it ended while MindRoom was down.
     """
-    child = job.adapter.get("child")
-    return job.kind == "delegation" and isinstance(child, dict) and bool(child.get("workflow_run_id"))
+    return is_workflow_node_payload(job.kind, job.adapter)
 
 
 def waited_for_approval(job: BackgroundJob) -> bool:
@@ -261,9 +266,15 @@ def _parse_saved_job(saved: SavedToolJob) -> BackgroundJob:
     return job
 
 
-def _parse_saved_jobs(saved_jobs: Sequence[SavedToolJob]) -> tuple[BackgroundJob, ...]:
-    """Validate saved snapshots in order without claiming or changing their execution."""
-    return tuple(_parse_saved_job(saved) for saved in saved_jobs)
+def _parse_saved_jobs(saved_jobs: Sequence[SavedToolJob], *, skip_invalid: bool = False) -> tuple[BackgroundJob, ...]:
+    """Validate saved snapshots in order, optionally skipping malformed rows."""
+    if not skip_invalid:
+        return tuple(_parse_saved_job(saved) for saved in saved_jobs)
+    parsed: list[BackgroundJob] = []
+    for saved in saved_jobs:
+        with suppress(ValueError):
+            parsed.append(_parse_saved_job(saved))
+    return tuple(parsed)
 
 
 def _encoded(job: BackgroundJob, payload: EncodedResultPayload | None) -> tuple[str, str | None]:
@@ -454,13 +465,15 @@ def _report_failed_drain(job_id: str, drain: asyncio.Task[BackgroundJob]) -> Non
         logger.error("Tool job cancellation drain failed", job_id=job_id, exc_info=error)
 
 
-async def saved_jobs(journal: EventJournalStore) -> list[BackgroundJob]:
+async def saved_jobs(
+    journal: EventJournalStore,
+    *,
+    delegation_ids: Sequence[str] | None = None,
+) -> list[BackgroundJob]:
     """Read the saved jobs that parse, owning none: an instance that runs no jobs keeps them for one that does."""
-    jobs: list[BackgroundJob] = []
-    for saved in await journal.tool_jobs("reader").load_all():
-        with suppress(ValueError):
-            jobs.append(_parse_saved_job(saved))
-    return jobs
+    store = journal.tool_jobs("reader")
+    rows = await store.load_all() if delegation_ids is None else await store.load_by_delegation_ids(delegation_ids)
+    return list(_parse_saved_jobs(rows, skip_invalid=True))
 
 
 def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
@@ -597,6 +610,8 @@ class ToolJobRuntime:
         self._follow_up_revisions: dict[FollowUpKey, int] = {}
         self._candidate_revision = 0
         self._ended_room_counts: dict[tuple[str, str], int] = {}
+        # Refreshed after deletions; expire_ended is the sole delete path for cold rows.
+        self._cold_ended_rooms: frozenset[tuple[str, str]] = frozenset()
         self._lock = asyncio.Lock()
         self._admissions: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._closed = False
@@ -632,7 +647,32 @@ class ToolJobRuntime:
 
     def ended_rooms(self) -> frozenset[tuple[str, str]]:
         """Return every ``(recipient, room_id)`` pair that currently retains at least one terminal job."""
-        return frozenset(self._ended_room_counts)
+        return frozenset(self._ended_room_counts) | self._cold_ended_rooms
+
+    async def has_job(self, job_id: str) -> bool:
+        """Return whether this runtime or its journal holds a job with *job_id*."""
+        return job_id in self._entries or await self._store.load_by_id(job_id) is not None
+
+    async def delegation_jobs(self, delegation_ids: Sequence[str]) -> tuple[BackgroundJob, ...]:
+        """Return hot and cold delegation jobs matching *delegation_ids*, without hydrating cold rows."""
+        wanted = frozenset(delegation_ids)
+        if not wanted:
+            return ()
+        results: dict[str, BackgroundJob] = {}
+        found: set[str] = set()
+        for entry in tuple(self._entries.values()):
+            if (did := job_delegation_id_from_payload(entry.job.kind, entry.job.adapter)) is not None and did in wanted:
+                results[entry.job.job_id] = entry.job
+                found.add(did)
+        if missing := tuple(did for did in dict.fromkeys(delegation_ids) if did not in found):
+            rows = await self._store.load_by_delegation_ids(missing)
+            for job in await self._parse_cold_rows(rows):
+                results[job.job_id] = job
+            # Include or prefer any job promoted into memory while the DB read or parse awaited.
+            for saved in rows:
+                if (entry := self._entries.get(saved.job_id)) is not None:
+                    results[saved.job_id] = entry.job
+        return tuple(results.values())
 
     def follow_up_candidate_revisions(self) -> dict[FollowUpKey, int]:
         """Return the current revision for every conversation with unconsumed depth-0 terminal candidates."""
@@ -713,6 +753,18 @@ class ToolJobRuntime:
         entry.claim = None
         self._claimed.discard(entry.job.job_id)
 
+    def _claim_waited_entry(self, entry: _Entry, *, readable: bool, claim: JobClaim | None) -> JobClaim | None:
+        """Hydrate and claim a readable entry, or release any previously held claim when unreadable."""
+        if readable:
+            if entry.job.job_id not in self._entries:
+                self._add_entry(entry)
+            return self._claim_for(entry, claim)
+        if claim is not None and entry.claim == claim:
+            # A wait that cannot read its job returns no claim, so it gives back the one it was handed.
+            self._clear_claim(entry)
+            self.changed.set()
+        return None
+
     def _add_entry(self, entry: _Entry) -> None:
         """Make an accepted job current and findable by its conversation, which never changes."""
         job = entry.job
@@ -751,28 +803,75 @@ class ToolJobRuntime:
         """Whether a caller owns a job it may still access."""
         return self._owns(entry.job, owner, depth) and self._grant(entry.job) == "allowed"
 
-    def _resolve_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry | None:
-        if (entry := self._entries.get(job_id)) is not None or not _JOB_PREFIX_PATTERN.fullmatch(job_id):
-            return entry
-        group = self._by_conversation.get(_conversation_key(self._canonical_owner(owner)), {})
-        ids = sorted(
-            cid
-            for cid, item in group.items()
-            if cid.startswith(job_id) and not _returned_inline(item) and self._visible(item, owner, depth)
-        )
-        if len(ids) > 1:
-            msg = f'Job ID prefix "{job_id}" matches several jobs in this conversation: {", ".join(ids)}. Pass the full ID.'
-            raise ValueError(msg)
-        return group[ids[0]] if ids else None
+    async def _parse_cold_rows(self, saved: Sequence[SavedToolJob]) -> tuple[BackgroundJob, ...]:
+        """Parse saved rows absent from memory so hot entries always shadow DB snapshots."""
+        cold_raw = [item for item in saved if item.job_id not in self._entries]
+        return await asyncio.to_thread(_parse_saved_jobs, cold_raw, skip_invalid=True) if cold_raw else ()
 
-    def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
+    async def _find_exact_entry(self, job_id: str) -> _Entry | None:
+        if (entry := self._entries.get(job_id)) is not None:
+            return entry
+        saved = await self._store.load_by_id(job_id, cold_only=True)
+        return None if saved is None else _Entry(_parse_saved_job(saved))
+
+    async def _conversation_candidates(
+        self,
+        owner: ToolExecutionIdentity,
+        depth: int,
+        cold_rows: Sequence[SavedToolJob],
+        *,
+        prefix: str | None = None,
+        exclude_workflow_nodes: bool = False,
+    ) -> list[_Entry]:
+        """Return visible non-inline hot and cold entries for *(owner, depth)*."""
+        group = self._by_conversation.get(_conversation_key(self._canonical_owner(owner)), {})
+        entries = [
+            item
+            for cid, item in group.items()
+            if (prefix is None or cid.startswith(prefix))
+            and not _returned_inline(item)
+            and not (exclude_workflow_nodes and is_workflow_node_job(item.job))
+            and self._visible(item, owner, depth)
+        ]
+        cold = (_Entry(job) for job in await self._parse_cold_rows(cold_rows))
+        return [*entries, *(item for item in cold if self._visible(item, owner, depth))]
+
+    async def _resolve_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry | None:
+        if (entry := await self._find_exact_entry(job_id)) is not None or not _JOB_PREFIX_PATTERN.fullmatch(job_id):
+            return entry
+        matches = await self._conversation_candidates(
+            owner,
+            depth,
+            await self._store.load_by_prefix(job_id),
+            prefix=job_id,
+        )
+        if len(matches) > 1:
+            ids = ", ".join(sorted(item.job.job_id for item in matches))
+            msg = f'Job ID prefix "{job_id}" matches several jobs in this conversation: {ids}. Pass the full ID.'
+            raise ValueError(msg)
+        return matches[0] if matches else None
+
+    async def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
-        entry = self._resolve_entry(job_id, owner, depth)
+        entry = await self._resolve_entry(job_id, owner, depth)
         if entry is None or not self._visible(entry, owner, depth):
             raise JobUnavailableError(_UNAVAILABLE)
         return entry
 
-    def _waited_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> tuple[_Entry, bool]:
+    def _check_waited_entry(
+        self,
+        entry: _Entry | None,
+        owner: ToolExecutionIdentity,
+        depth: int,
+    ) -> tuple[_Entry, bool]:
+        if entry is None or not self._owns(entry.job, owner, depth):
+            raise JobUnavailableError(_UNAVAILABLE)
+        grant = self._grant(entry.job)
+        if grant == "denied":
+            raise JobUnavailableError(_UNAVAILABLE)
+        return entry, grant == "allowed"
+
+    async def _waited_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> tuple[_Entry, bool]:
         """Return a job its caller may wait on, and whether its outcome is readable now.
 
         Only an unknown or foreign job, or a proven denial, refuses the wait; while the caller's access still
@@ -780,13 +879,7 @@ class ToolJobRuntime:
         call that may have run.
         """
         self._ensure_open()
-        entry = self._resolve_entry(job_id, owner, depth)
-        if entry is None or not self._owns(entry.job, owner, depth):
-            raise JobUnavailableError(_UNAVAILABLE)
-        grant = self._grant(entry.job)
-        if grant == "denied":
-            raise JobUnavailableError(_UNAVAILABLE)
-        return entry, grant == "allowed"
+        return self._check_waited_entry(await self._resolve_entry(job_id, owner, depth), owner, depth)
 
     async def _publish(
         self,
@@ -865,7 +958,8 @@ class ToolJobRuntime:
         async with self._lock:
             self._ensure_open()
             await self._store.require_ownership()
-            pending = [saved for saved in await self._store.load_all() if saved.job_id not in self._entries]
+            self._cold_ended_rooms = await self._store.load_ended_rooms()
+            pending = [saved for saved in await self._store.load_startup() if saved.job_id not in self._entries]
             if not pending:
                 return
             for job in await asyncio.to_thread(_parse_saved_jobs, pending):
@@ -1051,20 +1145,21 @@ class ToolJobRuntime:
                 reply_stop_order=reply_stop_order,
             )
             readable = True
-            if reattach and job_id in self._entries:
-                entry, readable = self._waited_entry(job_id, owner, depth)
+            existing = await self._find_exact_entry(job_id) if reattach else self._entries.get(job_id)
+            if reattach and existing is not None:
+                entry, readable = self._check_waited_entry(existing, owner, depth)
                 if _ADMITTED_OPERATION(entry.job) != _ADMITTED_OPERATION(job):
                     raise JobAccessError(_UNAVAILABLE)
             else:
-                if job_id in self._entries:
+                if existing is not None:
                     msg = "Tool job already exists."
-                    raise ValueError(msg)
+                    raise ToolJobExistsError(msg)
                 if not owner.session_id or depth < 0 or self._grant(job) != "allowed":
                     raise JobAccessError(_UNAVAILABLE)
                 entry = _Entry(job, cancel=cancel)
                 await run_coroutine_until_complete(self._admit(entry, operation, span_stopped))
             snapshot = await self._snapshot(entry)
-            return snapshot, self._claim_for(entry, None) if readable else None
+            return snapshot, self._claim_waited_entry(entry, readable=readable, claim=None)
 
     async def _admit(self, entry: _Entry, operation: _Operation, span_stopped: Callable[[], bool] | None) -> None:
         """Publish accepted ownership, then launch it unless its reply span was stopped; callers finish this first."""
@@ -1218,13 +1313,15 @@ class ToolJobRuntime:
             raise ValueError(msg)
         async with self._lock:
             self._ensure_open()
-            entries = [
-                entry
-                for entry in self._entries.values()
-                if not _returned_inline(entry)
-                and not is_workflow_node_job(entry.job)
-                and self._visible(entry, owner, depth)
-            ]
+            if not owner.session_id:
+                return []
+            entries = await self._conversation_candidates(
+                owner,
+                depth,
+                await self._store.load_listable(recipient=owner.recipient, room_id=owner.room_id),
+                exclude_workflow_nodes=True,
+            )
+            entries.sort(key=lambda entry: entry.job.job_id)
             entries.sort(key=lambda entry: entry.job.updated_at, reverse=True)
             entries.sort(key=lambda entry: entry.job.status in TERMINAL_STATUSES)
             return [await self._snapshot(entry) for entry in entries[offset : offset + limit]]
@@ -1254,13 +1351,9 @@ class ToolJobRuntime:
         work = None if work_timeout is None else _WorkAllowance(work_timeout, started)
         retained = False
         async with self._lock:
-            entry, readable = self._waited_entry(job_id, owner, depth)
+            entry, readable = await self._waited_entry(job_id, owner, depth)
             job_id = entry.job.job_id
-            if not readable and claim is not None and entry.claim == claim:
-                # A wait that cannot read its job returns no claim, so it gives back the one it was handed.
-                self._clear_claim(entry)
-                self.changed.set()
-            claim = self._claim_for(entry, claim) if readable else None
+            claim = self._claim_waited_entry(entry, readable=readable, claim=claim)
             if claim is None:
                 return _JobWait(await self._snapshot(entry))
         # A newer human message in the waiting reply's own conversation releases the wait unless the mid-turn judge
@@ -1273,7 +1366,7 @@ class ToolJobRuntime:
         try:
             while True:
                 async with self._lock:
-                    _, readable = self._waited_entry(job_id, owner, depth)
+                    _, readable = await self._waited_entry(job_id, owner, depth)
                     if not readable:
                         return _JobWait(await self._snapshot(entry))
                     if entry.job.status in TERMINAL_STATUSES:
@@ -1359,7 +1452,7 @@ class ToolJobRuntime:
             batch: list[_PendingUpdate] = []
             seen: set[str] = set()
             for wait in waits:
-                entry = self._entries.get(wait.job_id)
+                entry = await self._find_exact_entry(wait.job_id)
                 if entry is None:
                     errors.append((wait.job_id, KeyError(wait.job_id)))
                     continue
@@ -1396,9 +1489,10 @@ class ToolJobRuntime:
         """Ask a job its caller may see to stop, and return it as requested; the runtime drains it to its outcome."""
         async with self._lock:
             self._ensure_open(accepting=True)
-            entry = self._entry(job_id, owner, depth)
-            # A job that already ended still drains, which retries saving an outcome that failed to save.
-            await self._request_cancel(entry)
+            entry = await self._entry(job_id, owner, depth)
+            # A job that already ended still drains when its outcome failed to save; a durably terminal one is done.
+            if entry.job.status not in TERMINAL_STATUSES or not entry.saved:
+                await self._request_cancel(entry)
             return await self._snapshot(entry)
 
     async def cancel_revoked(self) -> None:
@@ -1577,30 +1671,63 @@ class ToolJobRuntime:
             candidates = [
                 await self._snapshot(entry) for entry in self._entries.values() if self._expirable(entry, now)
             ]
-        for job in candidates:
-            if not await source_finished(job):
-                continue
-            async with self._lock:
-                if self._closed or self._shutdown_task is not None:
-                    return deleted
-                entry = self._entries.get(job.job_id)
-                if entry is None or entry.job.updated_at != job.updated_at or not self._expirable(entry, now):
+            cold_jobs = await self._parse_cold_rows(
+                await self._store.load_expirable(
+                    inline_before=now - _INLINE_JOB_RETENTION,
+                    ended_before=now - _ENDED_JOB_RETENTION,
+                ),
+            )
+            candidates.extend(job for job in cold_jobs if self._job_expirable(job, now))
+        attempted_delete = False
+        try:
+            for job in candidates:
+                if not await source_finished(job):
                     continue
-                # A cancelled caller cannot separate the landed deletion from forgetting the job.
-                await run_coroutine_until_complete(self._store.delete(job.job_id))
-                self._remove_entry(job.job_id)
-                deleted.append(job)
+                async with self._lock:
+                    if self._closed or self._shutdown_task is not None:
+                        return deleted
+                    if not await self._is_still_expirable(job, now):
+                        continue
+                    attempted_delete = True
+
+                    async def delete_job(job_id: str = job.job_id) -> None:
+                        await self._store.delete(job_id)
+                        if job_id in self._entries:
+                            self._remove_entry(job_id)
+
+                    # A cancelled caller cannot separate the landed deletion from forgetting the job.
+                    await run_coroutine_until_complete(delete_job())
+                    deleted.append(job)
+        finally:
+            if attempted_delete:
+                await run_coroutine_until_complete(self._refresh_cold_ended_rooms())
         return deleted
 
-    def _expirable(self, entry: _Entry, now: datetime) -> bool:
-        job = entry.job
+    async def _is_still_expirable(self, job: BackgroundJob, now: datetime) -> bool:
+        """Return whether *job* still matches its timestamp and retention under the runtime lock."""
+        if (entry := self._entries.get(job.job_id)) is not None:
+            current = entry.job if entry.claim is None and entry.saved else None
+        else:
+            saved = await self._store.load_by_id(job.job_id, cold_only=True)
+            current = next(iter(_parse_saved_jobs((saved,), skip_invalid=True)), None) if saved is not None else None
+        return current is not None and current.updated_at == job.updated_at and self._job_expirable(current, now)
+
+    async def _refresh_cold_ended_rooms(self) -> None:
+        """Refresh the cached cold ended-room index without masking an active exception or expiry result."""
+        try:
+            async with self._lock:
+                if not self._closed and self._shutdown_task is None:
+                    self._cold_ended_rooms = await self._store.load_ended_rooms()
+        except Exception:
+            logger.warning("Failed to refresh cold ended rooms after expiry", exc_info=True)
+
+    @staticmethod
+    def _job_expirable(job: BackgroundJob, now: datetime) -> bool:
         retention = _INLINE_JOB_RETENTION if job.returned_inline else _ENDED_JOB_RETENTION
-        return (
-            job.status in TERMINAL_STATUSES
-            and entry.claim is None
-            and entry.saved
-            and datetime.fromisoformat(job.updated_at) < now - retention
-        )
+        return job.status in TERMINAL_STATUSES and datetime.fromisoformat(job.updated_at) < now - retention
+
+    def _expirable(self, entry: _Entry, now: datetime) -> bool:
+        return entry.claim is None and entry.saved and self._job_expirable(entry.job, now)
 
     async def quiesce(self) -> None:
         """Drain owned execution while response finalizers can still acknowledge consumed results."""
@@ -1638,7 +1765,7 @@ class ToolJobRuntime:
                     entry.task.cancel()
                     tasks.append(entry.task)
         await asyncio.gather(*tasks, return_exceptions=True)
-        for entry in self._entries.values():
+        for entry in tuple(self._entries.values()):
             if entry.saved and entry.job.status in TERMINAL_STATUSES:
                 continue
             # A job cancelled before the shutdown ends cancelled, as its cleanup was told.

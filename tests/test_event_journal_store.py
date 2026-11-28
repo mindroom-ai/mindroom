@@ -27,7 +27,7 @@ import tracemalloc
 import uuid
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, closing, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -65,6 +65,7 @@ from mindroom.event_journal import (
     reads,
     replacement_target,
     reply_messages,
+    reply_spans,
     room_claims,
     sqlite_backend,
     turn_rows,
@@ -89,7 +90,7 @@ from mindroom.turn_record import TurnRecord
 from tests.approval_card_helpers import card_is_terminal, pending_card, resolve_card_event, terminal_edit
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, postgres_journal_schema_url
-from tests.journal_helpers import membership_position, record_room_history_recovery
+from tests.journal_helpers import PlanRecorder, membership_position, record_room_history_recovery, sqlite_plan_database
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, reply_shown_for_approval
 
@@ -9623,10 +9624,9 @@ class TestConnectionSecretsStayOutOfLogs:
 
 def _plan_database(path: Path) -> sqlite3.Connection:
     """Return an empty SQLite journal schema to ask for query plans."""
-    database = sqlite3.connect(path)
-    for statement in schema_statements(SQLITE_DIALECT):
-        database.execute(statement)
-    return database
+    with sqlite_plan_database(path) as _:
+        pass
+    return sqlite3.connect(path)
 
 
 class TestHotQueriesAreIndexCovered:
@@ -9754,29 +9754,97 @@ class TestHotQueriesAreIndexCovered:
         sources joined that way are built for every principal, with an automatic
         index over them, on each page that has a pending row.
         """
-        database = _plan_database(tmp_path / "pending-plan.db")
-        plans: list[str] = []
+        with closing(_plan_database(tmp_path / "pending-plan.db")) as database:
+            recorder = PlanRecorder(database)
+            for room_id in (None, ROOM):
+                for after_receipt_order in (None, 1):
+                    journal.pending(
+                        cast("Transaction", recorder),
+                        "principal",
+                        limit=50,
+                        room_id=room_id,
+                        after_receipt_order=after_receipt_order,
+                    )
 
-        class _PlanRecorder:
-            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
-                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
-                plans.append(" | ".join(row[-1] for row in rows))
-                return ()
-
-        for room_id in (None, ROOM):
-            for after_receipt_order in (None, 1):
-                journal.pending(
-                    cast("Transaction", _PlanRecorder()),
-                    "principal",
-                    limit=50,
-                    room_id=room_id,
-                    after_receipt_order=after_receipt_order,
-                )
-
-        assert len(plans) == 4
-        for plan in plans:
-            assert "held_source USING INDEX reply_span_sources_event (principal_id=? AND event_id=?)" in plan, plan
+        assert len(recorder.plans) == 4
+        for plan in recorder.plans:
+            assert (
+                "held_source USING INDEX reply_span_sources_event_lookup (principal_id=? AND event_id=? AND role=?)"
+                in plan
+            ), plan
             assert not any(step in plan for step in ("SCAN ", "TEMP B-TREE", "AUTOMATIC", "MATERIALIZE")), plan
+
+    async def test_newest_reply_id_for_sources_uses_covering_lookup_index_without_stat1(self, tmp_path: Path) -> None:
+        """Without sqlite_stat1, newest_reply_id_for_sources uses the covering lookup index and drops the old index."""
+        db_path = tmp_path / "reply-sources-plan.db"
+        with closing(sqlite3.connect(db_path)) as raw:
+            for statement in schema_statements(SQLITE_DIALECT):
+                if "reply_span_sources_event_lookup" not in statement:
+                    raw.execute(statement)
+            raw.execute("CREATE INDEX reply_span_sources_event ON reply_span_sources (principal_id, event_id)")
+            raw.commit()
+
+        spans = (
+            ("reply-old", "span-old", "$shared", "pending", 1_000),
+            ("reply-other", "span-other", "$other", "logical", 1_001),
+            ("reply-new", "span-new", "$shared", "logical", 1_002),
+        )
+        backend = SqliteBackend.open(db_path, publish=ApprovalSignals().publish)
+        try:
+            await backend.write(
+                lambda tx: [
+                    (
+                        tx.execute(
+                            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, "
+                            "membership_epoch, state, last_span_id, presentation_json, confirmed_seq, revision, "
+                            "placeholder_only, reply_sequence, created_at_ns, updated_at_ns) "
+                            "VALUES ('principal', ?, 'agent', ?, 1, 'completed', ?, '{}', 1, 1, FALSE, 1, ?, ?)",
+                            (rid, ROOM, sid, ts, ts),
+                        ),
+                        tx.execute(
+                            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, "
+                            "bot_generation, base_sequence, claimed_at_ns) "
+                            "VALUES ('principal', ?, ?, 'turn', ?, 'gen', 0, ?)",
+                            (sid, rid, src, ts),
+                        ),
+                        tx.execute(
+                            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+                            "VALUES ('principal', ?, ?, ?, 0)",
+                            (sid, src, role),
+                        ),
+                    )
+                    for rid, sid, src, role, ts in spans
+                ],
+            )
+            assert (
+                await backend.read(
+                    lambda tx: reply_spans.newest_reply_id_for_sources(tx, "principal", ("$missing", "$shared")),
+                )
+                == "reply-new"
+            )
+            assert (
+                await backend.read(lambda tx: reply_spans.newest_reply_id_for_sources(tx, "principal", ("$missing",)))
+                is None
+            )
+        finally:
+            await backend.close()
+
+        with closing(sqlite3.connect(db_path)) as database:
+            assert database.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone() is None
+            indexes = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+            assert "reply_span_sources_event_lookup" in indexes
+            assert "reply_span_sources_event" not in indexes
+            recorder = PlanRecorder(database)
+            for event_ids in (("$shared",), ("$missing", "$shared")):
+                reply_spans.newest_reply_id_for_sources(cast("Transaction", recorder), "principal", event_ids)
+
+        assert len(recorder.plans) == 2
+        for plan in recorder.plans:
+            assert (
+                "SEARCH source USING COVERING INDEX reply_span_sources_event_lookup "
+                "(principal_id=? AND event_id=? AND role=?)" in plan
+            ), plan
+            assert "SCAN " not in plan, plan
 
     @pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 43), reason="octet_length arrived in SQLite 3.43")
     async def test_a_page_is_sized_without_loading_its_content(self, tmp_path: Path) -> None:
@@ -9805,31 +9873,19 @@ class TestHotQueriesAreIndexCovered:
         every export pass reads the whole room once per thread. The thread's rows also come from an index alone: a
         table row of a long message spills into overflow pages, which SQLite walks to reach `refresh_token`.
         """
-        database = _plan_database(tmp_path / "fingerprint-plan.db")
-        steps: list[str] = []
-
-        class _PlanRecorder:
-            def _plan(self, sql: str, params: Sequence[object]) -> None:
-                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
-                steps.extend(row[-1] for row in rows)
-
-            def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object]:
-                self._plan(sql, params)
-                # A standing hydration marker, so the thread's rows are read too.
-                return {
-                    "hydrated_epoch": 1,
-                    "current_epoch": 1,
-                    "walk_version": reads._THREAD_WALK_VERSION,
-                    "recovery_state": None,
-                    "complete": 1,
-                    "attempted_policy_rank": 1,
-                }
-
-            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
-                self._plan(sql, params)
-                return ()
-
-        reads.thread_fingerprint(cast("Transaction", _PlanRecorder()), "principal", room_id=ROOM, thread_id="$t")
+        # A standing hydration marker, so the thread's rows are read too.
+        marker = {
+            "hydrated_epoch": 1,
+            "current_epoch": 1,
+            "walk_version": reads._THREAD_WALK_VERSION,
+            "recovery_state": None,
+            "complete": 1,
+            "attempted_policy_rank": 1,
+        }
+        with closing(_plan_database(tmp_path / "fingerprint-plan.db")) as database:
+            recorder = PlanRecorder(database, fetchone_result=marker)
+            reads.thread_fingerprint(cast("Transaction", recorder), "principal", room_id=ROOM, thread_id="$t")
+        steps = [step for plan in recorder.plans for step in plan.split(" | ")]
 
         visible = [step for step in steps if "visible_messages" in step]
         assert any("thread_id=?" in step for step in visible), steps
@@ -9844,32 +9900,23 @@ class TestHotQueriesAreIndexCovered:
         Entered on the room or principal prefix alone, the plan still says SEARCH while every call reads each row of
         the room, payload included.
         """
-        database = _plan_database(tmp_path / "lookup-plan.db")
-        steps: list[str] = []
-
-        class _PlanRecorder:
-            def fetchone(self, sql: str, params: Sequence[object] = ()) -> None:
-                self.fetchall(sql, params)
-
-            def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
-                rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
-                steps.append(" | ".join(row[-1] for row in rows))
-                return ()
-
-        recorder = cast("Transaction", _PlanRecorder())
-        principal = "agent@@agent:example.org"
-        outbox.event_belongs_to_membership(
-            recorder,
-            principal,
-            room_id=ROOM,
-            event_id="$echo",
-            membership_epoch=1,
-            sender="@agent:example.org",
-            transaction_id="txn",
-        )
-        outbox.has_attempted_unacknowledged_prompt_delivery(recorder, principal, room_id=ROOM, membership_epoch=1)
-        reply_messages.event_ids_of_spans(recorder, principal, ROOM, ("span-1", "span-2"))
-        reply_messages.waiting_to_replay(recorder, principal, ("$a", "$b"))
+        with closing(_plan_database(tmp_path / "lookup-plan.db")) as database:
+            plan_recorder = PlanRecorder(database)
+            recorder = cast("Transaction", plan_recorder)
+            principal = "agent@@agent:example.org"
+            outbox.event_belongs_to_membership(
+                recorder,
+                principal,
+                room_id=ROOM,
+                event_id="$echo",
+                membership_epoch=1,
+                sender="@agent:example.org",
+                transaction_id="txn",
+            )
+            outbox.has_attempted_unacknowledged_prompt_delivery(recorder, principal, room_id=ROOM, membership_epoch=1)
+            reply_messages.event_ids_of_spans(recorder, principal, ROOM, ("span-1", "span-2"))
+            reply_messages.waiting_to_replay(recorder, principal, ("$a", "$b"))
+        steps = plan_recorder.plans
 
         columns = ("acknowledged_event_id=?", "transaction_id=?", "membership_epoch=?", "current_span_id=?", "state=?")
         assert len(steps) == len(columns), steps

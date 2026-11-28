@@ -28,6 +28,7 @@ type _SetupRooms = Callable[[list[AgentBot]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _CleanupOrphanedBots = Callable[[Config], Awaitable[None]]
+type _WaitForFirstSyncs = Callable[[list[AgentBot], float | None], Awaitable[None]]
 type _RunningBots = Callable[[], list[AgentBot]]
 
 
@@ -39,12 +40,19 @@ class StartupMaintenanceController:
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     cleanup_orphaned_bots: _CleanupOrphanedBots | None = None
+    wait_for_first_syncs: _WaitForFirstSyncs | None = None
     task: asyncio.Task[None] | None = field(default=None, init=False)
 
-    def start(self, bots: list[AgentBot], config: Config) -> None:
+    def start(
+        self,
+        bots: list[AgentBot],
+        config: Config,
+        *,
+        first_sync_deadline: float | None = None,
+    ) -> None:
         """Schedule detached startup maintenance for one startup generation."""
         self.task = create_logged_task(
-            self._run(bots, config),
+            self._run(bots, config, first_sync_deadline=first_sync_deadline),
             name="startup_maintenance",
             failure_message="Startup maintenance task failed",
         )
@@ -81,7 +89,20 @@ class StartupMaintenanceController:
                 if bots:
                     self.start(bots, config)
 
-    async def _run(self, bots: list[AgentBot], config: Config) -> None:
+    async def _run(
+        self,
+        bots: list[AgentBot],
+        config: Config,
+        *,
+        first_sync_deadline: float | None,
+    ) -> None:
+        if self.wait_for_first_syncs is not None:
+            wait = self.wait_for_first_syncs
+            await self._run_phase(
+                "startup_maintenance.wait_for_first_syncs",
+                lambda: wait(bots, first_sync_deadline),
+                failure_message="Startup wait for initial syncs failed",
+            )
         if self.cleanup_orphaned_bots is not None:
             cleanup = self.cleanup_orphaned_bots
             await self._run_phase(

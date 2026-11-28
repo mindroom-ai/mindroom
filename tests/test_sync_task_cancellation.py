@@ -2524,9 +2524,9 @@ async def test_start_runtime_publishes_after_every_first_sync_without_waiting_fo
     ):
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         try:
-            await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             for started in sync_started_by_entity.values():
                 await asyncio.wait_for(started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            assert not setup_started.is_set()
             assert not runtime_ready.is_set()
             assert orchestrator.response_admission_gate.closed
 
@@ -2537,11 +2537,12 @@ async def test_start_runtime_publishes_after_every_first_sync_without_waiting_fo
                 await asyncio.wait_for(runtime_ready.wait(), timeout=0.2)
             router_bot.release_pending_turn_journal_replay.assert_not_called()
             general_bot.release_pending_turn_journal_replay.assert_not_called()
+            assert not setup_started.is_set()
             assert orchestrator.response_admission_gate.closed
 
             router_bot.first_sync_complete = True
             await asyncio.wait_for(runtime_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-            await asyncio.sleep(0)
+            await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
             assert "setup_finished" not in call_order
             router_bot.release_pending_turn_journal_replay.assert_called()
@@ -2598,6 +2599,8 @@ async def test_a_reload_during_startups_first_sync_wait_applies_without_reopenin
 ) -> None:
     """Startup's wait holds no apply lock, so a reload applies during it; admission stays closed until startup publishes."""
     orchestrator, router_bot, general_bot = _orchestrator_with_membership_startup_bots(tmp_path, monkeypatch)
+    router_bot.first_sync_complete = False
+    general_bot.first_sync_complete = False
     # The config is a mock, so no Matrix account names the principal that keeps the approval cards.
     orchestrator._approval_cards = MagicMock(return_value=None)
     # Normal initialization completes the passive scan before runtime startup.
@@ -2639,7 +2642,8 @@ async def test_a_reload_during_startups_first_sync_wait_applies_without_reopenin
         runtime_task = asyncio.create_task(orchestrator._start_runtime())
         reload_task: asyncio.Task[None] | None = None
         try:
-            await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(router_sync_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            assert not setup_started.is_set()
             assert orchestrator.response_admission_gate.closed
 
             orchestrator.config_reload.request_reload()
@@ -2652,10 +2656,12 @@ async def test_a_reload_during_startups_first_sync_wait_applies_without_reopenin
             assert not runtime_ready.is_set()
             assert orchestrator.response_admission_gate.closed
 
-            setup_can_finish.set()
-            await asyncio.wait_for(router_sync_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            router_bot.first_sync_complete = True
+            general_bot.first_sync_complete = True
             await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            setup_can_finish.set()
             await asyncio.sleep(0)
             assert not orchestrator.response_admission_gate.closed
         finally:

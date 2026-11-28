@@ -321,11 +321,11 @@ async def _apply_initial_tags(
     room_id: str,
     thread_id: str,
     tags: Sequence[str],
-) -> bool:
-    """Apply generated tags only when no manual or concurrent tags exist."""
+) -> None:
+    """Best-effort apply generated tags only when no manual or concurrent tags exist."""
     set_by = client.user_id
     if not set_by:
-        return False
+        return
     try:
         result = await set_thread_tags_if_empty(
             client,
@@ -335,32 +335,32 @@ async def _apply_initial_tags(
             set_by=set_by,
         )
     except ThreadTagsPermissionError as exc:
-        # A room setting, not a fault: warn once per room, and a later summary tags once the power levels allow it.
+        # A room setting, not a fault: warn once per room; automatic tags are best-effort on Pass 2.
         if room_id not in _rooms_refusing_automatic_tags:
             _rooms_refusing_automatic_tags.add(room_id)
             logger.warning("Automatic thread tags need a higher power level", room_id=room_id, reason=str(exc))
-        return False
+        return
     except Exception:
         logger.exception(
             "Failed to apply automatic thread tags",
             room_id=room_id,
             thread_id=thread_id,
         )
-        return False
+        return
     if result.skipped_due_to_prior_mutation:
         logger.info(
             "Skipping automatic tags because another tag mutation completed first",
             room_id=room_id,
             thread_id=thread_id,
         )
-        return True
+        return
     if result.had_existing_tags:
         logger.info(
             "Skipping automatic tags because the thread already has tags",
             room_id=room_id,
             thread_id=thread_id,
         )
-        return True
+        return
     if result.applied_tags:
         logger.info(
             "Automatically tagged thread",
@@ -368,7 +368,6 @@ async def _apply_initial_tags(
             thread_id=thread_id,
             tags=result.applied_tags,
         )
-    return bool(result.applied_tags)
 
 
 async def _refresh_tag_vocabulary(
@@ -406,11 +405,13 @@ async def _deliver_generated_summary(
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
     projected_state: SummaryState,
-) -> None:
+    is_enrichment_pass: bool,
+) -> bool:
     """Apply initial tags, then independently deliver the generated summary.
 
     Re-reads pin state first (``_summary_delivery_timestamp``): a superseded
-    summary should apply neither its tags nor its title.
+    summary should apply neither its tags nor its title. Returns whether this
+    delivery durably recorded ``initial_enrichment_complete=True``.
     """
     try:
         generated_at = await _summary_delivery_timestamp(
@@ -423,7 +424,7 @@ async def _deliver_generated_summary(
         )
     except ThreadSummaryWriteError:
         logger.exception("Cannot order automatic thread summary", room_id=room_id, thread_id=thread_id)
-        return
+        return False
     if generated_at is None:
         logger.info(
             "Skipping automatic thread summary delivery after pin re-check",
@@ -431,14 +432,15 @@ async def _deliver_generated_summary(
             thread_id=thread_id,
             message_count=projected_state.message_count,
         )
-        return
+        return False
 
-    initial_enrichment_complete: bool | None = None
-    if generated.tags:
-        initial_enrichment_complete = await _apply_initial_tags(client, room_id, thread_id, generated.tags)
+    if is_enrichment_pass and generated.tags:
+        await _apply_initial_tags(client, room_id, thread_id, generated.tags)
+    # Pass 2 always finalizes title stability regardless of best-effort tag-write outcome.
+    initial_enrichment_complete: bool | None = True if is_enrichment_pass else None
 
     try:
-        await send_thread_summary_notice(
+        event_id = await send_thread_summary_notice(
             client,
             room_id,
             thread_id,
@@ -451,6 +453,8 @@ async def _deliver_generated_summary(
         )
     except Exception:
         logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
+        return False
+    return event_id is not None and is_enrichment_pass
 
 
 async def _countable_thread_history(
@@ -681,7 +685,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     membership_index: AgentReplyMembershipIndex,
     retitle: bool = False,
 ) -> None:
-    """Generate an early summary, then one-shot initial tags on its first refresh.
+    """Generate an early summary, then one final title check with one-shot initial tags, then stop.
 
     ``retitle`` summarizes now, whatever the thread's count, for a message that changes what the thread is about,
     such as a call's notes. A pinned or resolved thread keeps its title all the same.
@@ -689,7 +693,9 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
     baselines = schedule.THREAD_SUMMARY_BASELINES
     async with baselines.lock(room_id, thread_id):
-        if not retitle and baselines.in_failure_cooldown(room_id, thread_id):
+        if not retitle and (
+            baselines.is_finalized(room_id, thread_id) or baselines.in_failure_cooldown(room_id, thread_id)
+        ):
             return
         projected = await _countable_thread_history(conversation_reader, room_id, thread_id)
         if projected is None:
@@ -737,6 +743,9 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
             # Keep the cheap pre-check from loading history on every pinned turn.
             baselines.record(room_id, thread_id, message_count)
             return
+        if not retitle and state.initial_enrichment_complete:
+            baselines.mark_finalized(room_id, thread_id)
+            return
         if not retitle and message_count < baselines.next_threshold(room_id, thread_id, config):
             return
         if await _thread_is_resolved(client, room_id, thread_id):
@@ -749,13 +758,15 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
             baselines.record(room_id, thread_id, message_count)
             return
 
+        is_enrichment_pass = not retitle and state.last_summary_count > 0 and not state.initial_enrichment_complete
         tag_vocabulary = None
-        if state.last_summary_count > 0 and not state.initial_enrichment_complete:
+        if is_enrichment_pass:
             tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(
                 load_tag_vocabulary_snapshot(runtime_paths, room_id),
             )
-        # A long legacy title is rewritten once; a retitle asks for a new title outright.
-        current_title = _keepable_title(state.summary, retitle=retitle)
+        # Pass 1 (last_summary_count == 0) writes fresh from prompt + full reply without keeping a provisional title.
+        # Pass 2 offers the current title to keep unless it exceeds the short-title rule or this is a retitle.
+        current_title = _keepable_title(state.summary, retitle=retitle) if state.last_summary_count > 0 else None
         try:
             room_model, room_instructions = await room_title_settings(client, config, runtime_paths, room_id)
             model_name = room_model or resolve_thread_summary_model_name(
@@ -784,14 +795,8 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
             _record_generation_failure(room_id, thread_id, state)
             return
 
-        # A kept title with tags to apply is posted again as it is, so the notice records the tags as done.
+        # Both Pass 1 (advancing count from 0) and Pass 2 (recording initial_enrichment_complete) always post.
         normalized_summary = _title_to_deliver(generated, current_title, thread_history, thread_id)
-        # The first reply's check posts a kept prompt title again, so its count schedules the tagging refresh.
-        if normalized_summary == current_title and not generated.tags and state.last_summary_count > 0:
-            # Only this process remembers the check, as after a failed generation; a restart checks once more.
-            logger.debug("Keeping the current thread title", room_id=room_id, thread_id=thread_id)
-            baselines.record(room_id, thread_id, message_count)
-            return
         if not normalized_summary:
             logger.warning(
                 "Thread summary generation returned no plain-text content",
@@ -801,7 +806,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
             _record_generation_failure(room_id, thread_id, state)
             return
 
-        await _deliver_generated_summary(
+        finalized = await _deliver_generated_summary(
             client,
             room_id,
             thread_id,
@@ -812,7 +817,10 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
             trusted_sender_ids=trusted_sender_ids,
             authorize_human=authorize_human,
             projected_state=state,
+            is_enrichment_pass=is_enrichment_pass,
         )
+        if finalized:
+            baselines.mark_finalized(room_id, thread_id)
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
         baselines.record(room_id, thread_id, message_count)
