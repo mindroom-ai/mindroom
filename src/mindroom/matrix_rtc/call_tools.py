@@ -119,6 +119,7 @@ _SET_SPEAKING_RATE_TOOL_NAME = "set_speaking_rate"
 def _speaking_rate_tool_function(
     set_speaking_rate: Callable[[float], None],
     speaking_rate_bounds: tuple[float, float],
+    initial_speaking_rate: float = 1.0,
 ) -> ToolFunction:
     """Build the ephemeral call-only tool for adjusting speaking rate mid-call."""
     min_rate, max_rate = speaking_rate_bounds
@@ -136,6 +137,7 @@ def _speaking_rate_tool_function(
         name=_SET_SPEAKING_RATE_TOOL_NAME,
         description=(
             "Adjust the voice call speaking rate for subsequent speech. "
+            f"This call started at {initial_speaking_rate:g}x. "
             f"Use a number between {min_rate:g} (slower) and {max_rate:g} (faster), where 1.0 is normal speed."
         ),
         parameters={
@@ -160,12 +162,13 @@ def _speaking_rate_tool_function(
 def _speaking_rate_toolkit(
     set_speaking_rate: Callable[[float], None] | None,
     speaking_rate_bounds: tuple[float, float],
+    initial_speaking_rate: float = 1.0,
 ) -> AdaptedToolkit | None:
     if set_speaking_rate is None:
         return None
     return AdaptedToolkit(
         name="voice_call_controls",
-        functions=(_speaking_rate_tool_function(set_speaking_rate, speaking_rate_bounds),),
+        functions=(_speaking_rate_tool_function(set_speaking_rate, speaking_rate_bounds, initial_speaking_rate),),
         instructions=None,
     )
 
@@ -552,15 +555,14 @@ class _CallAgentCache:
             eager_deferred_tools=True,
             inline_tools=True,
         )
-        built = _refuse_text_chat_functions(
+        for toolkit in self.extra_toolkits:
+            build = _append_call_toolkit(build, toolkit)
+        return _refuse_text_chat_functions(
             _spoken(build),
             self.config,
             agent_name=self.agent_name,
             tools=self.context.plugins.tools,
         )
-        for toolkit in self.extra_toolkits:
-            built = _append_call_toolkit(built, toolkit)
-        return built
 
 
 async def build_call_tools(
@@ -581,6 +583,7 @@ async def build_call_tools(
     instructions_room_id: str | None = None,
     set_speaking_rate: Callable[[float], None] | None = None,
     speaking_rate_bounds: tuple[float, float] = REALTIME_SPEAKING_RATE_BOUNDS,
+    initial_speaking_rate: float = 1.0,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend.
 
@@ -624,7 +627,11 @@ async def build_call_tools(
     )
     execution_identity = context.execution_identity
     resolved_instructions_room_id = instructions_room_id or room_id
-    speaking_rate_toolkit = _speaking_rate_toolkit(set_speaking_rate, speaking_rate_bounds)
+    speaking_rate_toolkit = _speaking_rate_toolkit(
+        set_speaking_rate,
+        speaking_rate_bounds,
+        initial_speaking_rate,
+    )
     if enable_responder:
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
@@ -723,6 +730,8 @@ async def build_call_tools(
             ),
         ),
     )
+    if speaking_rate_toolkit is not None:
+        build = _append_call_toolkit(build, speaking_rate_toolkit)
     # Paid helper tools, such as claude_agent, record their usage in the call's ledger for the caller.
     usage_owner = _call_usage_owner(
         agent_name,
@@ -756,26 +765,6 @@ async def build_call_tools(
                     connect=functools.partial(connections.connect, toolkit),
                 ),
             )
-    extra_functions = (
-        tuple(f for f in speaking_rate_toolkit.functions if f.name not in build.spec.functions)
-        if speaking_rate_toolkit is not None
-        else ()
-    )
-    if speaking_rate_toolkit is not None and extra_functions:
-        tools.extend(
-            _wrap_tool_function(
-                function,
-                middleware=middleware,
-                call_context=call_context,
-                context=context,
-                agent_name=agent_name,
-                authorize_operation=authorize_operation,
-                usage_owner=usage_owner,
-                shell_scope=connections.shell_scope,
-                connect=functools.partial(connections.connect, speaking_rate_toolkit),
-            )
-            for function in extra_functions
-        )
     room_enrichment = render_system_enrichment_block((instructions_item,)) if instructions_item is not None else ""
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(

@@ -48,12 +48,12 @@ def _live_speaking_rate_instruction(rate: float) -> str:
             "Lengthen vowels and syllables smoothly rather than inserting silences between words, "
             "keeping every word clear and unhurried."
         )
-    if rate < 0.95:
+    if rate < 1.0:
         return (
             f"Standing pacing rule: speak slower than normal (about {rate:g}x speed). "
             "Stretch syllables gently with a calm, steady rhythm instead of adding pauses or silences between words."
         )
-    if rate <= 1.05:
+    if rate == 1.0:
         return (
             "Standing pacing rule: speak at a normal, natural conversational pace (1x speed), "
             "resetting any previous slower or faster pacing adjustment."

@@ -2529,10 +2529,12 @@ async def test_realtime_set_speaking_rate_tool_validates_authorizes_and_runs_on_
         authorize_operation=guard,
         set_speaking_rate=lambda rate: applied.append((rate, threading.current_thread())),
         speaking_rate_bounds=(0.25, 1.5),
+        initial_speaking_rate=1.2,
     )
     tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
     assert "set_speaking_rate" in tools
     tool = tools["set_speaking_rate"]
+    assert "This call started at 1.2x." in tool.info.raw_schema["description"]
 
     assert await tool({"rate": 1.25}) == "Speaking rate set to 1.25x."
     assert await tool({"rate": 1}) == "Speaking rate set to 1x."
@@ -2565,11 +2567,8 @@ async def test_responder_call_cache_attaches_set_speaking_rate_and_runs_it_in_ag
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cascaded and live responder builds attach call-only set_speaking_rate without touching text chat."""
+    """Cascaded and live responder builds attach call-only set_speaking_rate with its effective starting rate."""
     config = _config()
-    config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="*", agents=AGENT, action="require_approval")],
-    )
     runtime_paths = test_runtime_paths(tmp_path)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr(
@@ -2587,6 +2586,8 @@ async def test_responder_call_cache_attaches_set_speaking_rate_and_runs_it_in_ag
         captured_builds.append(build)
         assert "set_speaking_rate" in build.spec.functions
         function = build.spec.functions["set_speaking_rate"]
+        assert function.description is not None
+        assert "This call started at 1.4x." in function.description
         ctx = ToolCallContext(run_id="run", session_id="session", user_id=REQUESTER)
         ok = await run_tool_call(function, {"rate": 2.0}, ctx, middleware=build.tool_policy)
         assert ok.error is None
@@ -2608,6 +2609,7 @@ async def test_responder_call_cache_attaches_set_speaking_rate_and_runs_it_in_ag
         enable_responder=True,
         set_speaking_rate=lambda rate: applied.append((rate, threading.current_thread())),
         speaking_rate_bounds=(0.25, 4.0),
+        initial_speaking_rate=1.4,
     )
     assert tooling.responder is not None
 
@@ -2622,3 +2624,66 @@ async def test_responder_call_cache_attaches_set_speaking_rate_and_runs_it_in_ag
 
     assert tooling.close is not None
     await tooling.close()
+
+
+@pytest.mark.asyncio
+async def test_set_speaking_rate_obeys_tool_approval_on_realtime_and_responder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching tool_approval rule hides set_speaking_rate on realtime and refuses it on responder."""
+    config = _config()
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="*", agents=AGENT, action="require_approval")],
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
+    )
+
+    applied: list[float] = []
+    realtime_tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        set_speaking_rate=applied.append,
+        speaking_rate_bounds=(0.25, 1.5),
+    )
+    assert "set_speaking_rate" not in _tool_names(realtime_tooling.tools)
+    assert realtime_tooling.close is not None
+    await realtime_tooling.close()
+
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        build = turn.reusable_build
+        assert isinstance(build, AgentBuild)
+        function = build.spec.functions["set_speaking_rate"]
+        ctx = ToolCallContext(run_id="run", session_id="session", user_id=REQUESTER)
+        result = await run_tool_call(function, {"rate": 1.2}, ctx, middleware=build.tool_policy)
+        assert result.error is None
+        assert result.value == _TEXT_CHAT_REQUIRED_MESSAGE
+        return TurnResult("Please change that in text chat.")
+
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    responder_tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        set_speaking_rate=applied.append,
+        speaking_rate_bounds=(0.25, 1.5),
+    )
+    assert responder_tooling.responder is not None
+    await responder_tooling.responder("Speak faster", None)
+    assert applied == []
+    assert responder_tooling.close is not None
+    await responder_tooling.close()

@@ -341,21 +341,27 @@ async def test_live_delegation_times_each_stage_and_matches_acks_by_client_event
 
 
 @pytest.mark.parametrize(
-    ("rate", "expected_fragments"),
+    ("rate", "expected_fragments", "is_reset"),
     [
-        (0.5, ("0.5x", "very slowly", "silences")),
-        (0.8, ("0.8x", "slower", "syllables")),
-        (1.0, ("1x", "normal", "resetting")),
-        (1.15, ("1.15x", "briskly", "connected")),
-        (1.4, ("1.4x", "quickly", "connected")),
+        (0.5, ("0.5x", "very slowly", "silences"), False),
+        (0.8, ("0.8x", "slower", "syllables"), False),
+        (0.95, ("0.95x", "slower", "syllables"), False),
+        (1.0, ("1x", "normal", "resetting"), True),
+        (1.05, ("1.05x", "briskly", "connected"), False),
+        (1.15, ("1.15x", "briskly", "connected"), False),
+        (1.4, ("1.4x", "quickly", "connected"), False),
     ],
 )
 def test_live_speaking_rate_instruction_bands_are_concise_and_clear(
     rate: float,
     expected_fragments: tuple[str, ...],
+    *,
+    is_reset: bool,
 ) -> None:
-    """Every GPT-Live pacing band translates rate into concise guidance well under the 500-token append cap."""
+    """Every GPT-Live pacing band stays under the 500-token cap and reserves 1x reset wording for exact 1.0."""
     instruction = _live_speaking_rate_instruction(rate)
     assert len(instruction.encode("utf-8")) < 480
+    lowered = instruction.lower()
     for fragment in expected_fragments:
-        assert fragment in instruction.lower()
+        assert fragment in lowered
+    assert ("resetting" in lowered) is is_reset

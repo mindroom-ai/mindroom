@@ -183,3 +183,27 @@ def test_cascaded_tts_forwards_speed_to_realtime_and_endpoint_models(monkeypatch
         speed=1.8,
     )
     assert built == [{"voice": "ash", "model": "tts-1", "api_key": "sk-test", "speed": 1.8}]
+
+    # An explicit override (such as a mid-call rate preserved across reconnect) overrides extra_kwargs["speed"].
+    rt_override = _cascaded_tts(
+        SpeechServiceOptions(
+            provider="openai",
+            model="gpt-realtime-2.1-mini",
+            api_key="sk-test",
+            extra_kwargs={"voice": "ash", "speed": 1.3},
+        ),
+        speed=0.8,
+    )
+    assert isinstance(rt_override, RealtimeTTS)
+    assert rt_override._speed == 0.8
+
+    _cascaded_tts(
+        SpeechServiceOptions(
+            provider="openai",
+            model="tts-1",
+            api_key="sk-test",
+            extra_kwargs={"voice": "ash", "speed": 1.3},
+        ),
+        speed=0.8,
+    )
+    assert built[-1] == {"voice": "ash", "model": "tts-1", "api_key": "sk-test", "speed": 0.8}

@@ -27,10 +27,12 @@ class _CallProfileBase(BaseModel):
         if isinstance(value, bool):
             msg = "Speaking speed must be a number, not a boolean"
             raise ValueError(msg)  # noqa: TRY004 - keep Pydantic validation errors structured
-        if isinstance(value, float) and not math.isfinite(value):
-            msg = "Speaking speed must be a finite number"
-            raise ValueError(msg)
         return value
+
+    @property
+    def speaking_rate_bounds(self) -> tuple[float, float]:
+        """Return the valid speaking rate range for this profile."""
+        return REALTIME_SPEAKING_RATE_BOUNDS
 
 
 class LiveCustomVoice(BaseModel):
@@ -58,11 +60,6 @@ class RealtimeCallProfile(_CallProfileBase):
         description="Initial speaking rate multiplier (0.25 to 1.5; default 1.0)",
     )
 
-    @property
-    def speaking_rate_bounds(self) -> tuple[float, float]:
-        """Return the valid speaking rate range for this profile."""
-        return REALTIME_SPEAKING_RATE_BOUNDS
-
 
 class LiveCallProfile(_CallProfileBase):
     """One OpenAI Live voice session delegating tasks to a normal agent."""
@@ -87,11 +84,6 @@ class LiveCallProfile(_CallProfileBase):
         description="Configured LLM alias for delegated agent turns",
         json_schema_extra=dashboard_hint(reference="model"),
     )
-
-    @property
-    def speaking_rate_bounds(self) -> tuple[float, float]:
-        """Return the valid speaking rate range for this profile."""
-        return REALTIME_SPEAKING_RATE_BOUNDS
 
 
 class CascadedCallProfile(_CallProfileBase):

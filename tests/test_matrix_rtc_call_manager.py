@@ -7642,7 +7642,7 @@ async def test_runtime_ownership_loss_from_second_invited_call_agent_evicts_watc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("backend", "profile", "expected_speed", "expected_bounds", "expected_voice"),
+    ("backend", "profile", "expected_speed", "expected_initial_rate", "expected_bounds", "expected_voice"),
     [
         (
             "realtime",
@@ -7653,6 +7653,7 @@ async def test_runtime_ownership_loss_from_second_invited_call_agent_evicts_watc
                 voice="marin",
                 speed=1.2,
             ),
+            1.2,
             1.2,
             (0.25, 1.5),
             "marin",
@@ -7667,6 +7668,7 @@ async def test_runtime_ownership_loss_from_second_invited_call_agent_evicts_watc
                 speed=0.85,
             ),
             0.85,
+            0.85,
             (0.25, 1.5),
             {"id": "voice_custom_1"},
         ),
@@ -7679,6 +7681,7 @@ async def test_runtime_ownership_loss_from_second_invited_call_agent_evicts_watc
                 speed=1.8,
             ),
             1.8,
+            1.8,
             (0.25, 4.0),
             None,
         ),
@@ -7687,10 +7690,15 @@ async def test_runtime_ownership_loss_from_second_invited_call_agent_evicts_watc
             CascadedCallProfile(
                 backend="cascaded",
                 stt=SpeechServiceConfig(provider="openai", model="gpt-transcribe", credentials_service="openai"),
-                tts=SpeechServiceConfig(provider="openai", model="gpt-realtime-2.1-mini", credentials_service="openai"),
-                speed=1.25,
+                tts=SpeechServiceConfig(
+                    provider="openai",
+                    model="gpt-realtime-2.1-mini",
+                    credentials_service="openai",
+                    extra_kwargs={"voice": "ash", "speed": 1.3},
+                ),
             ),
-            1.25,
+            None,
+            1.3,
             (0.25, 1.5),
             None,
         ),
@@ -7701,11 +7709,12 @@ async def test_manager_wires_profile_speed_custom_voice_and_speaking_rate_callba
     tmp_path: Path,
     backend: str,
     profile: RealtimeCallProfile | LiveCallProfile | CascadedCallProfile,
-    expected_speed: float,
+    expected_speed: float | None,
+    expected_initial_rate: float,
     expected_bounds: tuple[float, float],
     expected_voice: str | dict[str, str] | None,
 ) -> None:
-    """CallManager wires profile speed, custom Live voice, bounds, and bridge.set_speaking_rate into every backend."""
+    """CallManager wires profile speed, starting rate, custom Live voice, bounds, and callback into every backend."""
     captured_kwargs: dict[str, object] = {}
 
     async def fake_tools(**kwargs: object) -> CallAgentTooling:
@@ -7739,6 +7748,7 @@ async def test_manager_wires_profile_speed_custom_voice_and_speaking_rate_callba
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
     assert captured_kwargs["speaking_rate_bounds"] == expected_bounds
+    assert captured_kwargs["initial_speaking_rate"] == expected_initial_rate
     callback = captured_kwargs["set_speaking_rate"]
     assert callable(callback)
     callback(1.1)
@@ -7757,4 +7767,104 @@ async def test_manager_wires_profile_speed_custom_voice_and_speaking_rate_callba
         assert "delegate the speed change so it persists" in live_instructions
     else:
         assert isinstance(options, CascadedVoiceAgentOptions)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "expected_first_speed", "expected_first_initial_rate"),
+    [
+        (
+            LiveCallProfile(
+                backend="live",
+                model="gpt-live-1.1",
+                credentials_service="openai_live",
+                voice="marin",
+                speed=1.2,
+            ),
+            1.2,
+            1.2,
+        ),
+        (
+            CascadedCallProfile(
+                backend="cascaded",
+                stt=SpeechServiceConfig(provider="openai", model="gpt-transcribe", credentials_service="openai"),
+                tts=SpeechServiceConfig(
+                    provider="openai",
+                    model="gpt-realtime-2.1-mini",
+                    credentials_service="openai",
+                    extra_kwargs={"voice": "ash", "speed": 1.3},
+                ),
+            ),
+            None,
+            1.3,
+        ),
+    ],
+)
+async def test_manager_reconnect_preserves_mid_call_speaking_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    profile: LiveCallProfile | CascadedCallProfile,
+    expected_first_speed: float | None,
+    expected_first_initial_rate: float,
+) -> None:
+    """A CallManager-driven reconnect for the same logical call keeps a mid-call speaking-rate override."""
+    tool_calls: list[dict[str, object]] = []
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tool_calls.append(dict(kwargs))
+        return CallAgentTooling(
+            tools=(),
+            instructions="Agent prompt.",
+            get_system_prompt=AsyncMock(return_value="Agent prompt.") if kwargs["enable_responder"] else None,
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("Done.")) if kwargs["enable_responder"] else None,
+            close=AsyncMock(),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_backends.get_api_key_for_service",
+        lambda _service, _runtime_paths: "sk-test",
+    )
+    config = _config()
+    config.calls = CallsConfig(
+        enabled=True,
+        profiles={"active": profile},
+        agents={"helper": "active"},
+        livekit_service_url=SERVICE_URL,
+    )
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    client.room_send.return_value = nio.RoomSendResponse("$notice", ROOM_ID)
+    bridges: list[FakeBridge] = []
+
+    def bridge_factory(_identity: str, _e2ee: bool) -> FakeBridge:
+        bridge = FakeBridge()
+        bridges.append(bridge)
+        return bridge
+
+    manager = _manager(client, FakeBridge(), tmp_path, config)
+    manager._bridge_factory = bridge_factory
+    _record_retry_delays(manager)
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert len(bridges) == 1
+    assert bridges[0].agent_options is not None
+    assert bridges[0].agent_options.speed == expected_first_speed
+    assert tool_calls[0]["initial_speaking_rate"] == expected_first_initial_rate
+
+    # Mid-call change updates both the active bridge and the logical call state.
+    callback = tool_calls[0]["set_speaking_rate"]
+    assert callable(callback)
+    callback(0.8)
+    assert bridges[0].speaking_rates == [0.8]
+
+    # Retryable disconnect rejoins the same logical call with the overridden speed.
+    await _fail_active_session(manager, bridges[0], "temporary drop")
+    assert len(bridges) == 2
+    assert bridges[1].agent_options is not None
+    assert bridges[1].agent_options.speed == 0.8
+    assert tool_calls[1]["initial_speaking_rate"] == 0.8
     await manager.shutdown()
