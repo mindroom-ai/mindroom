@@ -17,11 +17,16 @@ from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
     RuntimePaths,
     shell_execution_runtime_env_values,
+    shell_extra_env_values,
     subprocess_path_with_prepends,
     workspace_home_identity_env,
 )
 from mindroom.path_confinement import resolve_path_within_root
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import (
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SHELL_NON_INTERACTIVE_ENV_DEFAULTS,
+    strip_authenticated_proxy_env,
+)
 from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.background_scope import current_shell_background_scope
 from mindroom.shell.output_capture import ShellOutputDestination, ShellSpillPolicy
@@ -89,7 +94,6 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "SSL_CERT_DIR",
         "SSL_CERT_FILE",
         "SHELL",
-        "TERM",
         "TMPDIR",
         "UV_CACHE_DIR",
         "USER",
@@ -185,7 +189,7 @@ def _workspace_home_contract_env_from_process_env(base_process_env: dict[str, st
 
 
 def _shell_subprocess_env(
-    runtime_env: dict[str, str],
+    runtime_env: Mapping[str, str],
     *,
     call_environment: ToolEnvironment,
     base_process_env: dict[str, str] | None = None,
@@ -193,6 +197,8 @@ def _shell_subprocess_env(
     workspace_dir: Path | None = None,
     resolved_workspace_dir: Path | None = None,
     process_environ: Mapping[str, str] | None = None,
+    interactive: bool = False,
+    in_sandbox_request: bool = False,
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses.
 
@@ -205,6 +211,11 @@ def _shell_subprocess_env(
     env = {key: value for key, value in environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
+    if not in_sandbox_request:
+        # Scrub ambient proxies only: explicitly passed or injected proxies are part of the call's configuration.
+        env = strip_authenticated_proxy_env(env)
+    if not interactive:
+        env.update(SHELL_NON_INTERACTIVE_ENV_DEFAULTS)
     env.update(call_environment.applied(runtime_env, base_process_env or {}))
     for name in call_environment.removed:
         env.pop(name, None)
@@ -385,7 +396,11 @@ def _shell_output_policies(*, allow_spill: bool) -> tuple[ShellOutputDestination
             description="Path entries prepended to PATH for this agent's shell tool only.",
         ),
     ],
-    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS, ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT),
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.IN_SANDBOX_REQUEST,
+    ),
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shell",
     function_names=("run_shell_command",),
@@ -408,6 +423,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             tool_output_workspace_root: Path | None = None,
             allow_without_worker: bool = False,
             named_workers: bool = False,
+            in_sandbox_request: bool = False,
         ) -> None:
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
             # Beside a workdir, ``base_dir`` is the workdir; ``$MINDROOM_AGENT_WORKSPACE`` stays the workspace.
@@ -423,6 +439,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             # Whether calls may name a worker of their own, which the primary then routes them to.
             self._named_workers = named_workers
             self._in_worker = runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
+            self._in_sandbox_request = in_sandbox_request
 
             tools: list[Callable[..., object]] = []
             if all or enable_run_shell_command:
@@ -437,14 +454,19 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 dispatch.socket_path if dispatch is not None else os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV)
             ) or None
             self._process_environ = dispatch.process_environ if dispatch is not None else None
-            self._runtime_env = dict(
-                shell_execution_runtime_env_values(
+            if in_sandbox_request:
+                # The runner's request paths include its authorized execution env and worker overlays.
+                self._runtime_env = shell_execution_runtime_env_values(
                     runtime_paths,
                     extra_env_passthrough=extra_env_passthrough,
                     process_env=runtime_paths.process_env,
                     home_dir=self._process_environ.get("HOME") if self._process_environ else None,
-                ),
-            )
+                )
+            else:
+                self._runtime_env = shell_extra_env_values(
+                    extra_env_passthrough=extra_env_passthrough,
+                    process_env=runtime_paths.process_env,
+                )
             self._base_process_env = dict(runtime_paths.process_env)
             self._shell_path_prepend = shell_path_prepend
 
@@ -466,7 +488,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 parameters=closed_parameters(self.run_shell_command, {**function.parameters, "properties": properties}),
             )
 
-        def _command_env(self, process_environ: Mapping[str, str] | None = None) -> dict[str, str]:
+        def _command_env(
+            self,
+            process_environ: Mapping[str, str] | None = None,
+            *,
+            interactive: bool = False,
+        ) -> dict[str, str]:
             """Return the environment a command runs with, from ``process_environ`` (by default this process's)."""
             return _shell_subprocess_env(
                 self._runtime_env,
@@ -476,6 +503,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 shell_path_prepend=self._shell_path_prepend,
                 resolved_workspace_dir=self._resolved_workspace_dir,
                 process_environ=process_environ,
+                interactive=interactive,
+                in_sandbox_request=self._in_sandbox_request,
             )
 
         def terminal_launch(
@@ -487,12 +516,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             """Return an interactive Bash in the environment and workspace this toolkit's commands get.
 
             Not a function the agent calls: the sandbox runner starts it in a pty beside the commands it runs. It
-            reads no startup files, so it starts with exactly that environment, and no readline settings, so it
-            starts with Bash's built-in key bindings. ``process_environ`` is the environment of the process a
-            command runs from there, None for this one's.
+            reads no startup files or readline settings and skips the non-interactive defaults. It starts with
+            Bash's built-in key bindings. ``process_environ`` is the environment of the process a command runs from
+            there, None for this one's.
             The shell marks each prompt, which ``terminal_write(action="run")`` waits for (``mindroom.terminal.lines``).
             """
-            env = self._command_env(process_environ)
+            env = self._command_env(process_environ, interactive=True)
             env.update(TERM="xterm-256color", PROMPT_COMMAND=PROMPT_COMMAND, INPUTRC="/dev/null")
             return TerminalLaunch(
                 argv=("bash", "--noprofile", "--norc", "-i"),

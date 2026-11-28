@@ -140,7 +140,10 @@ async def test_a_terminal_starts_in_the_environment_and_workspace_of_the_agent_s
     assert terminal_env.pop("TERM") == "xterm-256color"
     # The shell marks its prompts and keeps its prompt command from the commands it starts.
     assert "PROMPT_COMMAND" not in terminal_env
-    for name in ("TERM", "SHLVL", "_"):
+    command_defaults = {"TERM": "dumb", "NO_COLOR": "1", "PAGER": "cat", "GIT_PAGER": "cat"}
+    assert {name: command_env.pop(name) for name in command_defaults} == command_defaults
+    assert command_defaults.keys().isdisjoint(terminal_env)
+    for name in ("SHLVL", "_"):
         command_env.pop(name, None)
         terminal_env.pop(name, None)
     assert terminal_env == command_env

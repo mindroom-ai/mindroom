@@ -162,6 +162,8 @@ A command that exits non-zero or stops at its timeout returns an error result, s
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; without `MINDROOM_SHELL_SYSTEMD_SLICE`, only a process started in its own session, such as with `setsid`, survives a stop (with `MINDROOM_SHELL_SYSTEMD_SLICE`, stopping kills the command's entire systemd scope, including `setsid` children).
 For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](../deployment/sandbox-proxy.md#stopping-and-background-commands).
 
+Non-interactive commands default to `NO_COLOR=1`, `TERM=dumb`, `PAGER=cat`, and `GIT_PAGER=cat` unless explicitly overridden.
+Local commands do not inherit the config's `.env` or ambient proxies with credentials; explicitly allowlisted process exports still pass through.
 Worker-routed `shell` sees only a small default environment; which variables pass by default and which `extra_env_passthrough` never passes are listed in [Shell environment and PATH](../deployment/sandbox-proxy.md#shell-environment-and-path).
 
 ### Configuration

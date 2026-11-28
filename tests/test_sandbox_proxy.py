@@ -88,7 +88,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
     worker_progress_pump_scope,
 )
-from mindroom.tool_system.tool_environment import ToolEnvironment
+from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import (
     SyncToolCompletionTracker,
@@ -3598,20 +3598,14 @@ def test_worker_env_includes_extra_env_passthrough(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path: Path) -> None:
-    """Direct shell execution should inherit committed runtime env values from the runtime `.env`."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+async def test_local_shell_receives_call_values_but_not_runtime_dotenv(tmp_path: Path) -> None:
+    """A call gets the exact value injected for it, not any other config-adjacent .env values."""
+    (tmp_path / ".env").write_text("FIXTURE_VALUE=from-dotenv\nFIXTURE_DOTENV_ONLY=hidden\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
+        config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={},
     )
-
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
@@ -3620,42 +3614,30 @@ async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path:
         tools=builtin_tool_registry(),
     )
     entrypoint = _offered_entrypoint(tool, "run_shell_command")
+    injected = "value with spaces and a literal $"
+    with collected_tool_environment(ToolEnvironment(values={"FIXTURE_VALUE": injected})):
+        result = await entrypoint('printf "%s" "${FIXTURE_VALUE-unset}|${FIXTURE_DOTENV_ONLY-unset}"')
 
-    result = await entrypoint(
-        [
-            sys.executable,
-            "-c",
-            'import os, sys; sys.stdout.write(os.environ.get("TEST_EXECUTION_ENV", ""))',
-        ],
-    )
-
-    assert result == "visible-in-shell"
+    assert result == f"{injected}|unset"
 
 
 @pytest.mark.asyncio
-async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_control_secrets(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Direct shell execution should allow explicit extra passthrough without leaking control secrets."""
-    monkeypatch.setenv("GITEA_TOKEN", "visible-gitea-token")
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "runner-secret")
-    monkeypatch.setenv("CI_JOB_TOKEN", "ci-secret")
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_control_secrets(tmp_path: Path) -> None:
+    """Passthrough exposes matching process exports but not dotenv entries or control variables."""
+    (tmp_path / ".env").write_text("FIXTURE_EXPORTED=from-dotenv\nFIXTURE_DOTENV_ONLY=hidden\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
+        config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env=dict(os.environ),
+        process_env={
+            "FIXTURE_EXPORTED": "from-process",
+            "EXACT_EXPORT": "explicit",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "runner-secret",
+        },
     )
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     save_scoped_credentials(
         "shell",
-        {"extra_env_passthrough": "GITEA_*, MINDROOM_*, CI_JOB_TOKEN"},
+        {"extra_env_passthrough": "FIXTURE_*, MINDROOM_*, EXACT_EXPORT"},
         credentials_manager=credentials_manager,
         worker_target=None,
     )
@@ -3668,37 +3650,23 @@ async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_c
         tools=builtin_tool_registry(),
     )
     entrypoint = _offered_entrypoint(tool, "run_shell_command")
-
     result = await entrypoint(
-        [
-            "bash",
-            "-lc",
-            "printf '%s' \"$GITEA_TOKEN|$MINDROOM_SANDBOX_PROXY_TOKEN|$CI_JOB_TOKEN|$TEST_EXECUTION_ENV\"",
-        ],
+        'printf "%s" "${FIXTURE_EXPORTED-unset}|${MINDROOM_SANDBOX_PROXY_TOKEN-unset}'
+        '|${EXACT_EXPORT-unset}|${FIXTURE_DOTENV_ONLY-unset}"',
     )
 
-    assert result == "visible-gitea-token||ci-secret|visible-in-shell"
+    assert result == "from-process|unset|explicit|unset"
 
 
 @pytest.mark.asyncio
-async def test_local_shell_does_not_expose_extra_parent_env_without_configuration(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Direct shell execution should not expose extra parent env without explicit config."""
-    monkeypatch.setenv("WHISPER_URL", "https://whisper.example")
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text("TEST_EXECUTION_ENV=visible-in-shell\n", encoding="utf-8")
+async def test_local_shell_does_not_expose_extra_parent_env_without_configuration(tmp_path: Path) -> None:
+    """Neither unlisted process exports nor .env values reach local commands by default."""
+    (tmp_path / ".env").write_text("FIXTURE_DOTENV_ONLY=hidden\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
+        config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
-        process_env=dict(os.environ),
+        process_env={"FIXTURE_EXPORTED": "from-process"},
     )
-
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
@@ -3707,10 +3675,9 @@ async def test_local_shell_does_not_expose_extra_parent_env_without_configuratio
         tools=builtin_tool_registry(),
     )
     entrypoint = _offered_entrypoint(tool, "run_shell_command")
+    result = await entrypoint('printf "%s" "${FIXTURE_EXPORTED-unset}|${FIXTURE_DOTENV_ONLY-unset}"')
 
-    result = await entrypoint(["bash", "-lc", "printf '%s' \"$WHISPER_URL|$TEST_EXECUTION_ENV\""])
-
-    assert result == "|visible-in-shell"
+    assert result == "unset|unset"
 
 
 @pytest.mark.asyncio
@@ -3969,6 +3936,42 @@ def test_dedicated_worker_runtime_config_resolves_include_tags(tmp_path: Path) -
     )
 
     assert config.models["default"].id == "gpt-6-astra"
+
+
+@pytest.mark.parametrize(
+    ("execution_env", "term"),
+    [({}, "dumb"), ({"TERM": "request-term"}, "request-term")],
+    ids=["ambient", "explicit"],
+)
+def test_runner_shell_command_launch_environment(
+    tmp_path: Path,
+    execution_env: dict[str, str],
+    term: str,
+) -> None:
+    """Streamed commands use non-interactive defaults, which only explicit request env can override."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"TERM": "ambient-term"},
+    )
+    call = execute_call(
+        runtime_paths,
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=["true"],
+        execution_env=execution_env,
+    )
+    launch, _ = sandbox_runner_module._shell_launch(
+        call,
+        lambda toolkit, process_environ: toolkit.command_launch(*call.request.args, process_environ=process_environ),
+    )
+
+    assert {name: launch.env[name] for name in ("TERM", "NO_COLOR", "PAGER", "GIT_PAGER")} == {
+        "TERM": term,
+        "NO_COLOR": "1",
+        "PAGER": "cat",
+        "GIT_PAGER": "cat",
+    }
 
 
 @pytest.mark.asyncio

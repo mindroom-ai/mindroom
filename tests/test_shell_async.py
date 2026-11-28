@@ -50,7 +50,7 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.tool_environment import ToolEnvironment
+from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.tools.shell import (
@@ -876,16 +876,11 @@ def test_run_shell_command_description_has_no_workspace_note_without_base_dir(tm
 
 
 @pytest.mark.asyncio
-async def test_env_passthrough_preserved(tmp_path: Path) -> None:
-    """Runtime env values from .env should be visible in shell commands."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text("MY_TEST_VAR=async-shell-works\n", encoding="utf-8")
+async def test_local_shell_does_not_inherit_dotenv(tmp_path: Path) -> None:
+    """Config-adjacent .env entries are not part of the default local command environment."""
+    (tmp_path / ".env").write_text("FIXTURE_DOTENV_ONLY=from-dotenv\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
+        config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={},
     )
@@ -896,10 +891,69 @@ async def test_env_passthrough_preserved(tmp_path: Path) -> None:
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    entrypoint = tool.functions["run_shell_command"]
 
-    result = await entrypoint(["bash", "-lc", "printf '%s' \"$MY_TEST_VAR\""])
-    assert result == "async-shell-works"
+    result = await tool.functions["run_shell_command"]('printf "%s" "${FIXTURE_DOTENV_ONLY-unset}"')
+    assert result == "unset"
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["defaults", "overridden"])
+@pytest.mark.asyncio
+async def test_run_shell_command_non_interactive_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: bool,
+) -> None:
+    """Non-interactive defaults ignore ambient values but yield to configured exports and call changes."""
+    monkeypatch.setenv("TERM", "ambient-term")
+    monkeypatch.setenv("NO_COLOR", "ambient-color")
+    paths = _make_runtime_paths(
+        tmp_path,
+        process_env={"TERM": "configured-term", "PAGER": "configured-pager", "GIT_PAGER": "configured-git-pager"},
+    )
+    tool = get_tool_by_name(
+        "shell",
+        paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+        tool_config_overrides={"extra_env_passthrough": "TERM,PAGER,GIT_PAGER"} if explicit else None,
+    )
+    overrides = {"NO_COLOR": None, "PAGER": None, "GIT_PAGER": "call-pager"} if explicit else {}
+    with collected_tool_environment(ToolEnvironment(values=overrides)):
+        result = await tool.functions["run_shell_command"](
+            'printf "%s" "${NO_COLOR-unset}|${TERM-unset}|${PAGER-unset}|${GIT_PAGER-unset}"',
+        )
+
+    assert result == ("unset|configured-term|unset|call-pager" if explicit else "1|dumb|cat|cat")
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["ambient", "overridden"])
+@pytest.mark.asyncio
+async def test_local_shell_filters_only_ambient_authenticated_proxies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: bool,
+) -> None:
+    """An authenticated proxy needs explicit passthrough or a call override, unlike a credential-free proxy."""
+    configured = "http://fixture:example@configured.invalid:8080"
+    injected = "http://fixture:example@injected.invalid:8080"
+    public = "http://public.invalid:8080"
+    monkeypatch.setenv("HTTP_PROXY", "http://fixture:example@ambient.invalid:8080")
+    paths = _make_runtime_paths(tmp_path, process_env={"HTTPS_PROXY": configured, "http_proxy": public})
+    tool = get_tool_by_name(
+        "shell",
+        paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+        tool_config_overrides={"extra_env_passthrough": "HTTPS_PROXY"} if explicit else None,
+    )
+    with collected_tool_environment(ToolEnvironment(values={"HTTP_PROXY": injected} if explicit else {})):
+        result = await tool.functions["run_shell_command"](
+            'printf "%s" "${HTTP_PROXY-unset}|${HTTPS_PROXY-unset}|${http_proxy-unset}"',
+        )
+
+    assert result == (f"{injected}|{configured}|{public}" if explicit else f"unset|unset|{public}")
 
 
 @pytest.mark.asyncio
