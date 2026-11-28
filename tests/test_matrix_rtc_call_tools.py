@@ -2534,7 +2534,11 @@ async def test_realtime_set_speaking_rate_tool_validates_authorizes_and_runs_on_
     tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
     assert "set_speaking_rate" in tools
     tool = tools["set_speaking_rate"]
-    assert "This call started at 1.2x." in tool.info.raw_schema["description"]
+    assert "(started at 1.2x)" in tool.info.raw_schema["description"]
+    assert (
+        tool.info.raw_schema["parameters"]["properties"]["rate"]["description"]
+        == "Multiplier from 0.25 (slower) to 1.5 (faster); 1.0 is normal."
+    )
 
     assert await tool({"rate": 1.25}) == "Speaking rate set to 1.25x."
     assert await tool({"rate": 1}) == "Speaking rate set to 1x."
@@ -2587,7 +2591,7 @@ async def test_responder_call_cache_attaches_set_speaking_rate_and_runs_it_in_ag
         assert "set_speaking_rate" in build.spec.functions
         function = build.spec.functions["set_speaking_rate"]
         assert function.description is not None
-        assert "This call started at 1.4x." in function.description
+        assert "(started at 1.4x)" in function.description
         ctx = ToolCallContext(run_id="run", session_id="session", user_id=REQUESTER)
         ok = await run_tool_call(function, {"rate": 2.0}, ctx, middleware=build.tool_policy)
         assert ok.error is None

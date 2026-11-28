@@ -135,11 +135,7 @@ def _speaking_rate_tool_function(
 
     return ToolFunction(
         name=_SET_SPEAKING_RATE_TOOL_NAME,
-        description=(
-            "Adjust the voice call speaking rate for subsequent speech. "
-            f"This call started at {initial_speaking_rate:g}x. "
-            f"Use a number between {min_rate:g} (slower) and {max_rate:g} (faster), where 1.0 is normal speed."
-        ),
+        description=f"Set voice call speaking rate (started at {initial_speaking_rate:g}x).",
         parameters={
             "type": "object",
             "properties": {
@@ -147,7 +143,7 @@ def _speaking_rate_tool_function(
                     "type": "number",
                     "minimum": min_rate,
                     "maximum": max_rate,
-                    "description": f"Speaking rate multiplier between {min_rate:g} and {max_rate:g} (1.0 is normal).",
+                    "description": f"Multiplier from {min_rate:g} (slower) to {max_rate:g} (faster); 1.0 is normal.",
                 },
             },
             "required": ["rate"],
