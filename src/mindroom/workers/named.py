@@ -27,8 +27,6 @@ from mindroom.tool_system.worker_routing import (
     named_worker_key,
     pinned_worker_state_scope_key,
     resolved_worker_key_scope,
-    shared_storage_root,
-    visible_workspace_roots,
     worker_log_id,
 )
 from mindroom.workers.backend import RetiringWorkerBackend, WorkerBackendError
@@ -37,13 +35,12 @@ from mindroom.workers.backends.kubernetes_config import (
     NAMED_WORKERS_MAX_ENV,
     configured_named_workers_max,
     configured_runtime_class_name,
-    sandbox_mount_dir_runtime_class_refusal,
 )
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES, WorkerSandboxConfig
 from mindroom.workers.runtime import idle_worker_cleanup_runs, lease_configured_primary_worker_manager
 from mindroom.workers.sandbox_mounts import (
-    normalize_sandbox_mount_dir,
-    resolve_sandbox_mount_target,
+    parse_sandbox_config,
+    resolve_worker_sandbox_mount,
 )
 
 if TYPE_CHECKING:
@@ -213,6 +210,13 @@ class NamedWorkerCall:
             mirror_grantable_credentials=normal_spec.mirror_grantable_credentials and self.sandbox is None,
         )
 
+    def locked_sandbox(self, normal_worker_key: str) -> WorkerSandboxConfig | None:
+        """Return the fleet's already-locked sandbox config for this worker if admitted, else this call's sandbox."""
+        worker_key = self._fleet.worker_key(normal_worker_key, self.name)
+        with _lock:
+            worker = self._fleet.workers.get(worker_key)
+            return worker.sandbox if worker is not None else self.sandbox
+
     def header(self, handle: WorkerHandle) -> str:
         """Return the line the call's result starts with, which names its worker and says when it is a new start."""
         return self._fleet.header(self.name, handle)
@@ -265,29 +269,15 @@ def _parse_sandbox_config(
     *,
     runtime_paths: RuntimePaths,
 ) -> tuple[WorkerSandboxConfig | None, bool]:
-    if sandbox is False and mount_dir is not None:
-        msg = "mount_dir always runs in sandbox mode; omit sandbox or set sandbox=true."
-        raise NamedWorkerError(msg)
-    if mount_read_only is True and mount_dir is None:
-        msg = "mount_read_only requires mount_dir."
-        raise NamedWorkerError(msg)
-    normalized_mount_dir: str | None = None
-    if isinstance(mount_dir, str):
-        try:
-            normalized_mount_dir = normalize_sandbox_mount_dir(mount_dir)
-        except ValueError as exc:
-            msg = f"Invalid mount_dir: {exc}"
-            raise NamedWorkerError(msg) from exc
-        runtime_class_name = configured_runtime_class_name(runtime_paths)
-        if runtime_class_name is not None:
-            raise NamedWorkerError(sandbox_mount_dir_runtime_class_refusal(runtime_class_name))
-    sandbox_specified = sandbox is not None or mount_dir is not None or mount_read_only is not None
-    sandbox_config = (
-        WorkerSandboxConfig(mount_dir=normalized_mount_dir, mount_read_only=bool(mount_read_only))
-        if sandbox is True or normalized_mount_dir is not None
-        else None
-    )
-    return sandbox_config, sandbox_specified
+    try:
+        return parse_sandbox_config(
+            sandbox,
+            mount_dir,
+            mount_read_only,
+            runtime_class_name=configured_runtime_class_name(runtime_paths),
+        )
+    except ValueError as exc:
+        raise NamedWorkerError(str(exc)) from exc
 
 
 def sandbox_mount_relative_path(
@@ -300,32 +290,17 @@ def sandbox_mount_relative_path(
     validate: bool = True,
 ) -> Path | None:
     """Return the storage-relative mount path for ``sandbox`` (None for empty scratch), validating on disk."""
-    if sandbox.mount_dir is None:
-        return None
-    root = shared_storage_root(storage_root)
-    policies = config.get_agent_policies() if config is not None else {}
-    workspaces = visible_workspace_roots(
-        root,
-        worker_key,
-        policies,
-        private_agent_names=private_agent_names or frozenset(),
-    )
     try:
-        target_rel, _ = resolve_sandbox_mount_target(
-            storage_root=root,
-            workspaces=workspaces,
-            mount_dir=sandbox.mount_dir,
+        return resolve_worker_sandbox_mount(
+            storage_root=storage_root,
+            worker_key=worker_key,
+            private_agent_names=private_agent_names,
+            config=config,
+            sandbox=sandbox,
             validate=validate,
         )
-    except FileNotFoundError as exc:
-        msg = f"Sandbox mount_dir '{sandbox.mount_dir}' does not exist in the agent workspace."
-        raise NamedWorkerError(msg) from exc
-    except OSError as exc:
-        msg = f"Sandbox mount_dir '{sandbox.mount_dir}' must be a real directory without symlinks."
-        raise NamedWorkerError(msg) from exc
     except ValueError as exc:
         raise NamedWorkerError(str(exc)) from exc
-    return target_rel
 
 
 def named_worker_call(

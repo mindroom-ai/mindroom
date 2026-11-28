@@ -16,17 +16,23 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from mindroom.workers.models import ScriptResourceProfileName
+    from mindroom.workers.models import ScriptResourceProfileName, WorkerSandboxConfig
 
-__all__ = ["DedicatedWorkerPlacement", "dedicated_worker_placement", "placement_for_session"]
+__all__ = [
+    "DedicatedWorkerPlacement",
+    "bound_sandbox_placement",
+    "dedicated_worker_placement",
+    "placement_for_session",
+]
 
 
 @dataclass(frozen=True, slots=True)
 class DedicatedWorkerPlacement:
-    """One subagent's own worker: the subagent it is pinned to and the resource profile it starts with."""
+    """One subagent's own worker: its pin ID, resource profile, and optional sandbox mount isolation."""
 
     subagent_id: str
     resource_profile: ScriptResourceProfileName | None = None
+    sandbox: WorkerSandboxConfig | None = None
 
 
 # The session the running attempt places and its placement, or None when it places none.
@@ -50,3 +56,9 @@ def placement_for_session(session_id: str | None) -> DedicatedWorkerPlacement | 
     """Return the placement the running attempt binds for ``session_id``, if any."""
     bound = _placement.get()
     return bound[1] if bound is not None and session_id is not None and bound[0] == session_id else None
+
+
+def bound_sandbox_placement() -> tuple[str, DedicatedWorkerPlacement] | None:
+    """Return the active ``(session_id, placement)`` when the running attempt requires sandboxed execution."""
+    bound = _placement.get()
+    return bound if bound is not None and bound[1].sandbox is not None else None

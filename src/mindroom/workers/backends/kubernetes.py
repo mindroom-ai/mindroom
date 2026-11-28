@@ -52,6 +52,7 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
     LABEL_TAILNET_SSH,
+    LABEL_WORKER_SANDBOX,
     SANDBOX_RUNNER_API_ROOT,
     WORKER_SSH_PORT,
     ConfiguredWorkerBackend,
@@ -293,6 +294,8 @@ class KubernetesWorkerBackend:
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
         self._ready_workers_lock = threading.Lock()
+        self._ephemeral_admission_lock = threading.Lock()
+        self._starting_ephemeral_workers: set[str] = set()
         # The setup wait of each worker's latest start, which the tool callers of that worker share.
         self._setup_waits: dict[str, tuple[threading.Lock, list[tuple[str, WorkerStartReporter, httpx.Response]]]] = {}
         # When each worker directory was first seen without a Deployment, infinity for one no pass removes.
@@ -361,6 +364,10 @@ class KubernetesWorkerBackend:
             # lifetime, where a restart would keep the old one's age and files.
             self._retire_worker_locked(worker_key)
             existing = None
+        ephemeral_pod = pinned_worker_kind(worker_key) == "named" or (
+            spec.sandbox is not None and pinned_worker_kind(worker_key) == "subagent"
+        )
+        admitted_ephemeral = False
         current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
         should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
         lifecycle = prepare_worker_ensure_lifecycle(
@@ -382,6 +389,9 @@ class KubernetesWorkerBackend:
             reporter = self._progress.start_reporter(spec)
         auth_secret_applied = False
         try:
+            if existing is None and ephemeral_pod:
+                self._admit_ephemeral_worker(worker_key)
+                admitted_ephemeral = True
             if existing is None and pinned_worker_kind(worker_key) is not None:
                 self._prepare_pinned_state(worker_key, state_subpath, launch, sandbox=spec.sandbox)
             # kubelet resolves the read-only mirror subPath when the pod starts, so the
@@ -463,6 +473,10 @@ class KubernetesWorkerBackend:
             if isinstance(exc, WorkerBackendError):
                 raise
             raise WorkerBackendError(failure_reason) from exc
+        finally:
+            if admitted_ephemeral:
+                with self._ephemeral_admission_lock:
+                    self._starting_ephemeral_workers.discard(worker_key)
 
         if reporter is not None and spec.wait_for_setup:
             self._setup_waits[worker_key] = (threading.Lock(), [(worker_id, reporter, health)])
@@ -586,6 +600,43 @@ class KubernetesWorkerBackend:
             if cached is not None and (not deployment.spec.replicas or deployment.metadata.uid != cached.incarnation):
                 self._ready_workers.pop(worker_key, None)
         return True
+
+    def _is_ephemeral_sandbox_deployment(self, deployment: resources.KubernetesDeployment) -> str | None:
+        if deployment.metadata.deletion_timestamp is not None:
+            return None
+        annotations = dict(deployment.metadata.annotations or {})
+        key = annotations.get(resources.ANNOTATION_WORKER_KEY, "")
+        kind = pinned_worker_kind(key)
+        if kind == "named":
+            return key
+        if kind == "subagent" and (
+            (deployment.metadata.labels or {}).get(LABEL_WORKER_SANDBOX) == "true"
+            or resources.parse_sandbox_annotation(annotations) is not None
+        ):
+            return key
+        return None
+
+    def _admit_ephemeral_worker(self, worker_key: str) -> None:
+        """Reserve one combined ephemeral sandbox/named-worker slot against ``named_workers_max``."""
+        with self._ephemeral_admission_lock:
+            if self.named_workers_max < 1:
+                msg = "Ephemeral sandboxed workers are disabled on this deployment (named_workers_max is 0)."
+                raise WorkerBackendError(msg)
+            with _named_worker_admission_read() as timeout:
+                deployments = self._resources.list_deployments(request_timeout=timeout)
+            live = {
+                key
+                for deployment in deployments
+                if (key := self._is_ephemeral_sandbox_deployment(deployment)) is not None
+            }
+            counted = live | self._starting_ephemeral_workers
+            if worker_key not in counted and len(counted) >= self.named_workers_max:
+                msg = (
+                    f"Cannot start sandboxed worker: this deployment already has its limit of "
+                    f"{self.named_workers_max} ephemeral named/sandbox workers. Try again later."
+                )
+                raise WorkerBackendError(msg)
+            self._starting_ephemeral_workers.add(worker_key)
 
     def named_worker_keys(self) -> frozenset[str]:
         """Return the key of every named worker that exists, running or stopped, and is not being removed."""
@@ -755,12 +806,16 @@ class KubernetesWorkerBackend:
             # A tool caller that waits for this worker's setup is using it now, which leaves its age as it is.
             handle = replace(handle, last_used_at=now, status="ready" if handle.status == "idle" else handle.status)
         named = pinned_worker_kind(handle.worker_key) == "named"
+        sandboxed_subagent = (
+            pinned_worker_kind(handle.worker_key) == "subagent"
+            and resources.parse_sandbox_annotation(dict(deployment.metadata.annotations or {})) is not None
+        )
         if named and handle.created_at < self._process_started_at:
             return "retire"
         expired = (
             now - handle.last_used_at >= self.config.named_worker_idle_timeout_seconds
             or now - handle.created_at >= self.config.named_worker_max_age_seconds
-            if named
+            if named or sandboxed_subagent
             else subagent_worker_expired(handle, self.idle_timeout_seconds, now=now)
         )
         if int(deployment.spec.replicas or 0) == 0:

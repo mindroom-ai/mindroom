@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,8 @@ __all__ = ["minimal_bash_toolkit"]
 
 def minimal_bash_toolkit(
     execute: Callable[[ToolKey, dict[str, object], str], Awaitable[str | ToolValue]] | None = None,
+    *,
+    sandboxed: bool = False,
 ) -> AdaptedToolkit:
     """Project the agent's shell function into one provider-visible Bash function.
 
@@ -66,5 +69,8 @@ def minimal_bash_toolkit(
         return await execute(ToolKey("shell", SHELL_FUNCTION), arguments, call_id)
 
     function = adapt_callable(bash)
-    function = replace(function, parameters=closed_parameters(bash, function.parameters))
+    description = function.description
+    if sandboxed and description is not None:
+        description = re.sub(r", and cannot make\s+new ``mindroom-agent`` CLI calls after handoff", "", description)
+    function = replace(function, description=description, parameters=closed_parameters(bash, function.parameters))
     return AdaptedToolkit(name="minimal_bash", functions=(function,), instructions=None)

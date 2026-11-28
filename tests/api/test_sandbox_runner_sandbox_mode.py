@@ -260,7 +260,7 @@ def test_empty_scratch_sandbox_uses_worker_workspace_without_resolve_agent_runti
         stream_io=stream_io,
     )
     assert refused_frames[-1]["ok"] is False
-    assert "mindroom_output_path is not supported in a sandboxed named worker" in refused_frames[-1]["error"]
+    assert "mindroom_output_path is not supported in a sandboxed worker" in refused_frames[-1]["error"]
 
 
 @pytest.mark.parametrize("stream_io", [False, True], ids=["execute", "stream_io"])
@@ -358,7 +358,7 @@ def test_readonly_mount_dir_keeps_home_writable_skips_hook_and_autosave(
             stream_io=stream_io,
         )
         assert refused_frames[-1]["ok"] is False
-        assert "mindroom_output_path is not supported in a sandboxed named worker" in refused_frames[-1]["error"]
+        assert "mindroom_output_path is not supported in a sandboxed worker" in refused_frames[-1]["error"]
     finally:
         mounted_dir.chmod(0o755)
 
@@ -588,7 +588,7 @@ def test_writable_mount_dir_autosaves_and_refuses_explicit_output_path(
             stream_io=stream_io,
         )
         assert refused[-1]["ok"] is False
-        assert "mindroom_output_path is not supported in a sandboxed named worker" in refused[-1]["error"]
+        assert "mindroom_output_path is not supported in a sandboxed worker" in refused[-1]["error"]
 
 
 def test_dedicated_worker_refuses_sandbox_mount_dir_without_startup_pin(

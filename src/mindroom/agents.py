@@ -91,6 +91,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.tools.filesystem import with_view_file_hint
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
+from mindroom.workers.models import SANDBOX_ALLOWED_TOOLKITS
 from mindroom.workers.named import named_workers_refusal
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
@@ -116,6 +117,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
     from mindroom.turn_model import TurnModel
+    from mindroom.workers.models import WorkerSandboxConfig
 
 logger = get_logger(__name__)
 
@@ -1165,6 +1167,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     plugins: ConfigPlugins,
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
+    worker_sandbox: WorkerSandboxConfig | None = None,
 ) -> _AgentToolAssembly:
     """Assemble the toolkits one agent instance offers and its dynamic-tool visibility.
 
@@ -1177,57 +1180,71 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     agent_name = agent_tools.agent_name
     # Only a top-level agent's own calls can become jobs: a nested subagent's run inside its parent's job, a minimal
     # agent's return to the CLI command that made them, and a voice call's finish inside the call's turn.
+    sandboxed = worker_sandbox is not None
     calls_as_jobs = (
         background_tool_jobs_enabled(config, runtime_paths)
         and delegation_depth == 0
         and not minimal_mode
         and not inline_tools
+        and not sandboxed
     )
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
     room_tools = turn_keeps_room_tools(execution_identity)
-    # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
-    # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
-    # deferred, portable tool search keeps them off the wire, and builds narrowed to an explicit tool list, plus voice
-    # calls on models without native tool search, send them as ordinary tools.
-    selected = agent_tools.candidates(
-        depth=delegation_depth,
-        room_tools=room_tools,
-        deferred=required_tool_names if minimal_mode and not eager_deferred_tools else None,
-        portable_search=portable_deferred_tools,
-    )
-    resolved_tool_configs = (
-        {}
-        if disable_runtime_capabilities
-        else {entry.name: entry for entry in selected if entry.name not in disabled_tool_names}
-    )
-    deferred_configs = {}
-    if minimal_mode:
-        complete = agent_tools.candidates(depth=delegation_depth, room_tools=room_tools)
-        deferred_configs = {
-            entry.name: entry
-            for entry in complete
-            if entry.name not in resolved_tool_configs and entry.name not in disabled_tool_names
-        }
-    if (
-        not disable_runtime_capabilities
-        and narrowed_tools is None
-        and "desktop" not in resolved_tool_configs
-        and "desktop" not in deferred_configs
-        and "desktop" not in disabled_tool_names
-        and "desktop" not in agent_tools.facts.disabled
-        and agent_tools.tools.available("desktop")
-        and execution_identity is not None
-        and turn_keeps_room_tools(execution_identity)
-        and has_ready_self_service_desktop(config, runtime_paths, agent_name, execution_identity.requester_id)
-    ):
-        resolved_tool_configs["desktop"] = EffectiveToolConfig(
-            name="desktop",
-            tool_config_overrides={},
-            authored_order=len(resolved_tool_configs) + len(deferred_configs),
-            authored_name="desktop",
-        )
     placement = tool_placement(runtime_paths, agent_tools.tools)
+    if sandboxed:
+        allowed = frozenset({"shell"}) if minimal_mode else SANDBOX_ALLOWED_TOOLKITS
+        complete = agent_tools.candidates(depth=delegation_depth, room_tools=room_tools)
+        resolved_tool_configs = (
+            {}
+            if disable_runtime_capabilities
+            else {
+                entry.name: entry
+                for entry in complete
+                if entry.name in allowed
+                and entry.name not in disabled_tool_names
+                and agent_tools.runs_in_worker(entry.name, placement)
+            }
+        )
+        deferred_configs: dict[str, EffectiveToolConfig] = {}
+    else:
+        selected = agent_tools.candidates(
+            depth=delegation_depth,
+            room_tools=room_tools,
+            deferred=required_tool_names if minimal_mode and not eager_deferred_tools else None,
+            portable_search=portable_deferred_tools,
+        )
+        resolved_tool_configs = (
+            {}
+            if disable_runtime_capabilities
+            else {entry.name: entry for entry in selected if entry.name not in disabled_tool_names}
+        )
+        deferred_configs = {}
+        if minimal_mode:
+            complete = agent_tools.candidates(depth=delegation_depth, room_tools=room_tools)
+            deferred_configs = {
+                entry.name: entry
+                for entry in complete
+                if entry.name not in resolved_tool_configs and entry.name not in disabled_tool_names
+            }
+        if (
+            not disable_runtime_capabilities
+            and narrowed_tools is None
+            and "desktop" not in resolved_tool_configs
+            and "desktop" not in deferred_configs
+            and "desktop" not in disabled_tool_names
+            and "desktop" not in agent_tools.facts.disabled
+            and agent_tools.tools.available("desktop")
+            and execution_identity is not None
+            and turn_keeps_room_tools(execution_identity)
+            and has_ready_self_service_desktop(config, runtime_paths, agent_name, execution_identity.requester_id)
+        ):
+            resolved_tool_configs["desktop"] = EffectiveToolConfig(
+                name="desktop",
+                tool_config_overrides={},
+                authored_order=len(resolved_tool_configs) + len(deferred_configs),
+                authored_name="desktop",
+            )
     workspace_in_worker = agent_tools.workspace_in_worker([*resolved_tool_configs, *deferred_configs], placement)
     entries: list[_ToolkitEntry] = []
     assembly: _AgentToolAssembly | None = None
@@ -1260,8 +1277,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
-                deferred_toolkits=searched_toolkits,
+                deferred_toolkits=None if sandboxed else searched_toolkits,
                 calls_as_jobs=toolkit_calls_as_jobs,
+                worker_sandbox=worker_sandbox,
             )
         if toolkit is None:
             return None
@@ -1398,13 +1416,14 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         execution_identity,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities
+        and not sandboxed
         and narrowed_tools is None
         and background_tool_jobs_enabled(config, runtime_paths),
         output_file_policy=output_file_policy,
     )
     if controls is not None:
         entries.append(_job_controls_entry(controls))
-    peer_tools = WorkflowPeerTools.build(enabled=not disable_runtime_capabilities)
+    peer_tools = WorkflowPeerTools.build(enabled=not disable_runtime_capabilities and not sandboxed)
     if peer_tools is not None:
         peer_adapted = adapt_toolkit(peer_tools, key=peer_tools.name)
         if tool_function_filter is not None:
@@ -1517,32 +1536,40 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         cli_deferred.append(
             DeferredAgentToolkit(deferred_entry.name, metadata.description if metadata else "", materialize),
         )
-    supports_output_redirect, supports_workspace_skill_authoring = _prompt_tool_capabilities(
-        offered,
-        deferred_configs,
-        agent_tools=agent_tools,
-        runtime_paths=runtime_paths,
-        worker_target=agent_runtime.execution.worker_target,
-        portable_deferred_tools=portable_deferred_tools,
-        narrowed_tools=narrowed_tools,
-        supports_native_tool_approval=supports_native_tool_approval,
+    supports_output_redirect, supports_workspace_skill_authoring = (
+        (False, False)
+        if sandboxed
+        else _prompt_tool_capabilities(
+            offered,
+            deferred_configs,
+            agent_tools=agent_tools,
+            runtime_paths=runtime_paths,
+            worker_target=agent_runtime.execution.worker_target,
+            portable_deferred_tools=portable_deferred_tools,
+            narrowed_tools=narrowed_tools,
+            supports_native_tool_approval=supports_native_tool_approval,
+        )
     )
     assembly = _AgentToolAssembly(
         entries=offered,
         instructions=toolkit_instructions(entry.adapted for entry in offered),
         cli_deferred=tuple(cli_deferred),
-        named_workers=any(
-            function.registered_toolkit == "shell" and "worker" in function.parameters.get("properties", {})
-            for entry in offered
-            for function in entry.adapted.functions
-        )
-        or (
-            # A deferred shell is not built yet; use the same routing and policy checks as its schema.
-            not disable_runtime_capabilities
-            and "shell" in deferred_configs
-            and agent_tools.runs_in_worker("shell", placement)
-            and (target := agent_runtime.execution.worker_target) is not None
-            and named_workers_refusal(target.routing_agent_name, config, runtime_paths) is None
+        named_workers=False
+        if sandboxed
+        else (
+            any(
+                function.registered_toolkit == "shell" and "worker" in function.parameters.get("properties", {})
+                for entry in offered
+                for function in entry.adapted.functions
+            )
+            or (
+                # A deferred shell is not built yet; use the same routing and policy checks as its schema.
+                not disable_runtime_capabilities
+                and "shell" in deferred_configs
+                and agent_tools.runs_in_worker("shell", placement)
+                and (target := agent_runtime.execution.worker_target) is not None
+                and named_workers_refusal(target.routing_agent_name, config, runtime_paths) is None
+            )
         ),
         supports_output_redirect=supports_output_redirect,
         supports_workspace_skill_authoring=supports_workspace_skill_authoring,
@@ -1823,6 +1850,170 @@ def _generated_entries(
     return [_ToolkitEntry(adapted=toolkit) for toolkit in generated]
 
 
+def _render_sandbox_system_role(
+    worker_sandbox: WorkerSandboxConfig,
+    *,
+    worker_routed_tool_names: tuple[str, ...],
+    has_persona: bool,
+) -> str:
+    """Build an allowlisted system role for a sandboxed subagent (no ambient agent/Matrix/workspace leaks)."""
+    if worker_sandbox.mount_dir is None:
+        mount_line = "Workspace: isolated scratch directory only (no agent workspace files are mounted)."
+    elif worker_sandbox.mount_read_only:
+        mount_line = f"Workspace: mounted subdirectory `{worker_sandbox.mount_dir}` (read-only)."
+    else:
+        mount_line = f"Workspace: mounted subdirectory `{worker_sandbox.mount_dir}` (read-write)."
+    tools_line = (
+        f"Active tools: {', '.join(worker_routed_tool_names)}." if worker_routed_tool_names else "Active tools: none."
+    )
+    lines = [
+        *([] if has_persona else ["You are a sandboxed subagent running in an isolated Kubernetes worker."]),
+        mount_line,
+        tools_line,
+        "Confinement: tools are restricted to this sandbox workspace. No credentials, memory, knowledge bases, "
+        "skills, shared directories, or workspace files outside the mounted directory are available.",
+    ]
+    return "\n".join(lines)
+
+
+def _create_sandbox_agent(
+    agent_name: str,
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    model: TurnModel,
+    provider: ModelProvider | None,
+    plugins: ConfigPlugins,
+    outside_matrix: bool,
+    disable_runtime_capabilities: bool,
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    supports_native_tool_approval: bool,
+    required_tool_names: tuple[str, ...],
+    agent_mode: AgentMode,
+    inline_tools: bool,
+    persona: SubagentPersona | None,
+    tool_names: tuple[str, ...] | None,
+    worker_sandbox: WorkerSandboxConfig,
+) -> AgentBuild:
+    """Build a sandboxed subagent strictly by allowlist (no workspace scaffold, memory, skills, knowledge, or ambient prompt)."""
+    with _agent_create_timing("resolve_runtime"):
+        agent_runtime = resolve_agent_runtime(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+            create=False,
+        )
+    agent_config = config.get_agent(agent_name)
+    if provider is None:
+        provider = _build_agent_model_provider(config, runtime_paths, model.model_name, execution_identity)
+    persona_prompt = persona.system_prompt if persona is not None else None
+    narrowed_tools = persona.tools if persona is not None else tool_names
+    agent = config.resolve_agent(agent_name)
+    agent_tools = AgentTools(config=config, facts=agent.tools, tools=plugins.tools)
+    tool_function_filter, disabled_tool_names = persona_tool_policy(
+        narrowed_tools,
+        lambda: caller_toolkit_names(agent_name, config, plugins.tools, delegation_depth=delegation_depth),
+        tool_function_filter,
+    )
+    output_file_policy = ToolOutputFilePolicy.for_current_tools(
+        agent_runtime.workspace.root,
+        runtime_paths,
+        auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+    )
+    tool_assembly = _assemble_agent_toolkits(
+        agent_tools,
+        runtime_paths,
+        agent_runtime,
+        execution_identity=execution_identity,
+        disable_runtime_capabilities=disable_runtime_capabilities,
+        disabled_tool_names=disabled_tool_names,
+        tool_function_filter=tool_function_filter,
+        delegation_depth=delegation_depth,
+        refresh_scheduler=refresh_scheduler,
+        supports_native_tool_approval=supports_native_tool_approval,
+        wire_deferred_tools=False,
+        portable_deferred_tools=False,
+        eager_deferred_tools=True,
+        required_tool_names=required_tool_names,
+        minimal_mode=agent_mode == "minimal",
+        inline_tools=inline_tools,
+        persona=persona,
+        narrowed_tools=narrowed_tools,
+        output_file_policy=None,
+        plugins=plugins,
+        knowledge=None,
+        skills=None,
+        worker_sandbox=worker_sandbox,
+    )
+    spec = AgentSpec(
+        id=agent_name,
+        name=agent_config.display_name,
+        model=provider,
+        system_messages=(),
+        toolkits=tool_assembly.toolkits,
+        max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
+    )
+    prompt = PromptSpec(
+        persona=persona_prompt,
+        role=_render_sandbox_system_role(
+            worker_sandbox,
+            worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
+            has_persona=persona_prompt is not None,
+        ),
+        instructions=(),
+        markdown=False,
+        tool_instructions=tool_assembly.instructions,
+        turn_context=render_session_context(config, agent.timezone),
+        skills_block=None,
+        knowledge_block=None,
+    )
+    surface = AgentSurface(
+        mode=agent_mode,
+        cli_shell=False,
+        deferred=(),
+        context_documents=(),
+        context_files=(),
+        knowledge_sources=(),
+        identity=persona_prompt,
+        toolkit_names=(),
+        memory_root=None,
+        runtime_context="",
+        named_workers=False,
+        minimal_instructions=(),
+        interactive_prompt="",
+        skills=(),
+        output_file_policy=output_file_policy,
+        worker_sandbox=worker_sandbox,
+    )
+    logger.info(
+        "Created sandboxed agent",
+        agent=agent_name,
+        model_provider=provider.identity.provider,
+        model_id=provider.identity.id,
+        tool_count=sum(entry.toolkit is not None for entry in tool_assembly.entries),
+    )
+    return AgentBuild(
+        spec=spec,
+        prompt=prompt,
+        request_template=ModelRequest(
+            messages=(),
+            deferred_tools=DeferredTools(names=frozenset(), portable=False),
+            overrides=RequestOverrides(
+                wait_for_connectivity=not outside_matrix
+                and (execution_identity is None or execution_identity.channel == "matrix"),
+            ),
+        ),
+        history_settings=agent.history_settings,
+        tool_policy=bind_live_tools(spec.functions, tool_assembly.tool_middleware),
+        tool_jobs=None,
+        surface=surface,
+    )
+
+
 @timed("system_prompt_assembly.agent_create")
 def create_agent(
     agent_name: str,
@@ -1848,6 +2039,7 @@ def create_agent(
     persona: SubagentPersona | None = None,
     tool_names: tuple[str, ...] | None = None,
     provider: ModelProvider | None = None,
+    worker_sandbox: WorkerSandboxConfig | None = None,
 ) -> AgentBuild:
     """Build an agent from configuration: its model, tools, prompt, request settings, and surface.
 
@@ -1893,6 +2085,8 @@ def create_agent(
             skills or knowledge, and a listed toolkit that fails to build is left out like in any other build.
         required_tool_names: Authored toolkits needed by a saved approval, which a minimal-mode agent
             attaches directly instead of through mindroom-agent.
+        worker_sandbox: Kubernetes sandbox isolation config for sandboxed subagents; builds an
+            allowlisted prompt and strips ambient context, memory, skills, knowledge, and non-sandbox tools.
 
     Returns:
         The agent build the agent loop runs.
@@ -1901,18 +2095,39 @@ def create_agent(
         ValueError: If agent_name is not found in configuration
 
     """
-    create_runtime_state = not disable_runtime_capabilities
+    if worker_sandbox is not None:
+        return _create_sandbox_agent(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity,
+            model=model,
+            provider=provider,
+            plugins=plugins,
+            outside_matrix=outside_matrix,
+            disable_runtime_capabilities=disable_runtime_capabilities,
+            tool_function_filter=tool_function_filter,
+            delegation_depth=delegation_depth,
+            refresh_scheduler=refresh_scheduler,
+            supports_native_tool_approval=supports_native_tool_approval,
+            required_tool_names=required_tool_names,
+            agent_mode=agent_mode,
+            inline_tools=inline_tools,
+            persona=persona,
+            tool_names=tool_names,
+            worker_sandbox=worker_sandbox,
+        )
     with _agent_create_timing("resolve_runtime"):
         agent_runtime = resolve_agent_runtime(
             agent_name,
             config,
             runtime_paths,
             execution_identity=execution_identity,
-            create=create_runtime_state,
+            create=not disable_runtime_capabilities,
         )
 
     agent_config = config.get_agent(agent_name)
-    if create_runtime_state:
+    if not disable_runtime_capabilities:
         _ensure_agent_workspace(config, agent_name, runtime_paths)
 
     model_name = model.model_name

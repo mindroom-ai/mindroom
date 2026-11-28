@@ -27,16 +27,17 @@ _SCHEMA_DIGESTS = {
     11: "b1265dfe3c60ab47d8da1c3a318ba313f519e8f8c9501b1019b1a4cfa2318d92",
     12: "25d680524f1632af22f889aa725da1d9efa512dc2cda7e6080b8563d54961e45",
     13: "170aae16eebaeda975f897e98c9dcf8e6ac12613d9d2e63be24194c0e79807e6",
+    14: "5ea67313bd11253bfeded87408407a95aa11c7bf2a6207033640641c7de3197b",
 }
 # The opt-in fields of each wire model, with the worker protocol that was current when each one was added.
 _OPT_IN_FIELDS = {
     "ExecuteRequest": {"structured_result": 8},
     "ExecuteResponse": {"metadata": 8},
 }
-# What a call that asks for nothing new sends and gets back at protocol 13, as main renders them without any opt-in
+# What a call that asks for nothing new sends and gets back at protocol 14, as main renders them without any opt-in
 # field.
 _PLAIN_REQUEST = (
-    '{"protocol":13,"worker_key":null,"worker_scope":null,"routing_agent_name":null,"execution_identity":null,'
+    '{"protocol":14,"worker_key":null,"worker_scope":null,"routing_agent_name":null,"execution_identity":null,'
     '"private_agent_names":null,"config_snapshot":null,"base_dir":null,"tool_name":"shell",'
     '"function_name":"run_shell_command","args":[],"kwargs":{"args":"echo hi"},"lease_id":null,'
     '"tool_config_overrides":{},"tool_init_overrides":{},"execution_env":{},'
@@ -157,7 +158,7 @@ def test_response_serialization_schema_preserves_properties() -> None:
 def test_a_plain_call_is_byte_identical_to_the_wire_before_the_opt_in_fields() -> None:
     """A call that asks for nothing new sends and gets the bodies a peer from before the opt-in fields knows."""
     request = protocol.ExecuteRequest(
-        protocol=13,
+        protocol=14,
         tool_name="shell",
         function_name="run_shell_command",
         kwargs={"args": "echo hi"},
@@ -182,4 +183,4 @@ def test_a_call_that_opts_in_carries_its_field_which_an_older_peer_refuses() -> 
     assert answer.model_dump(mode="json")["metadata"] == {"exit_code": 3}
     assert protocol.ExecuteResponse.model_validate_json(answer.model_dump_json()) == answer
     with pytest.raises(ValidationError, match="unknown_field"):
-        protocol.CancelRequest.model_validate({"protocol": 13, "request_id": "r", "unknown_field": True})
+        protocol.CancelRequest.model_validate({"protocol": 14, "request_id": "r", "unknown_field": True})

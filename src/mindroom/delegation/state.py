@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
 from mindroom.history.types import HistoryScope
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
+from mindroom.workers.models import WorkerSandboxConfig
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -166,6 +167,14 @@ class DelegationChild:
     # Whether the child's worker-routed calls run in a worker of its own, and the resource profile that worker gets.
     dedicated_worker: bool = False
     worker_resource_profile: ScriptResourceProfileName | None = None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a subagent could run in a Kubernetes sandbox.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `worker_sandbox`.
+    # Last legacy release: v2026.11.690; the release with this change writes `worker_sandbox`.
+    # Handling: The default reads such a child as unsandboxed (`None`), which is how it ran. It stays on the model
+    # because run metadata is rewritten only by a conversation layout step.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    worker_sandbox: WorkerSandboxConfig | None = None
     # LEGACY_COMPAT: Delegation child snapshots stored before a settled child kept its cost.
     # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
     # background job's adapter that lacks `cost_usd` and `subagents_cost_usd`.
@@ -231,7 +240,35 @@ class DelegationChild:
         """
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona")
-        return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
+        raw_sandbox = fields.pop("worker_sandbox", None)
+        worker_sandbox = _sandbox_from_dict(raw_sandbox)
+        return cls(
+            **fields,
+            persona=None if persona is None else SubagentPersona.from_dict(persona),
+            worker_sandbox=worker_sandbox,
+        )
+
+
+def _sandbox_from_dict(data: object) -> WorkerSandboxConfig | None:
+    if data is None:
+        return None
+    if isinstance(data, WorkerSandboxConfig):
+        return data
+    if not isinstance(data, dict) or set(data) != {"mount_dir", "mount_read_only"}:
+        msg = "Invalid worker sandbox snapshot"
+        raise TypeError(msg)
+    mount_dir, mount_read_only = data["mount_dir"], data["mount_read_only"]
+    if type(mount_read_only) is not bool:
+        msg = "Invalid worker sandbox snapshot"
+        raise TypeError(msg)
+    if mount_dir is None:
+        if mount_read_only:
+            msg = "Invalid worker sandbox snapshot"
+            raise TypeError(msg)
+    elif not isinstance(mount_dir, str) or not mount_dir or "\x00" in mount_dir:
+        msg = "Invalid worker sandbox snapshot"
+        raise TypeError(msg)
+    return WorkerSandboxConfig(mount_dir=mount_dir, mount_read_only=mount_read_only)
 
 
 _MAX_CALLER_TOOL_CALL_ID_CHARACTERS = 256

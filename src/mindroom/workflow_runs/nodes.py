@@ -23,6 +23,7 @@ from mindroom.script_runs.store import (
     ScriptRunStoreError,
 )
 from mindroom.workflow_runs.agent_nodes import (
+    AgentNodeError,
     delegated_request,
     dispatch_agent,
     load_follow_up_child,
@@ -40,12 +41,19 @@ from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
     SERVED_RUN_STATES,
     DispatchHandle,
+    NodeReceipt,
     WorkflowNode,
     WorkflowNodeState,
     WorkflowRun,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.peers import script_op, session_turn_message, valid_wait_seconds, withdraw_unread
+from mindroom.workflow_runs.peers import (
+    is_sandboxed_workflow_request,
+    script_op,
+    session_turn_message,
+    valid_wait_seconds,
+    withdraw_unread,
+)
 from mindroom.workflow_runs.replay import (
     CALLING_NODE,
     DIRTY_DIGEST,
@@ -76,7 +84,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.engine import WorkflowEngine
-    from mindroom.workflow_runs.models import NodeReceipt, NodeRequest
+    from mindroom.workflow_runs.models import NodeRequest
 
 _CHANGED_WITHOUT_EDIT = (
     "Call n{seq} changed between attempts without a script edit. It probably contains the time or a random value; "
@@ -432,18 +440,18 @@ async def _dispatch_new(
             return await _ask_gate(engine, run, attempt, node, (grant, arguments))
         follow_up = None
         if turn_ctx is not None:
-            mail = partial(
-                session_turn_message,
-                engine.store,
-                run.run_id,
-                turn_ctx.session,
-                key,
-                generation,
-                str(asked_args["message"]),
+            prepared_turn = await _prepare_session_turn_node(
+                engine,
+                run,
+                node,
+                epoch,
+                turn_ctx=turn_ctx,
+                saved=saved,
+                asked_args=asked_args,
             )
-            turn_msg = await asyncio.to_thread(mail, prev_turn=turn_ctx.prev)
-            follow_up, prompt = await _prepare_turn(engine, run, turn_ctx, saved, turn_msg)
-            node = replace(node, request={**asked_args, "prompt": prompt, "effective_message": turn_msg})
+            if isinstance(prepared_turn, NodeReceipt):
+                return prepared_turn
+            follow_up, node = prepared_turn
         start = partial(dispatch_agent, engine, run, timeout=_timeout(meta), follow_up=follow_up)
         return await engine.enter(run, node, start)
     if grant is not None:
@@ -545,6 +553,42 @@ def _turn_context(engine: WorkflowEngine, run: WorkflowRun, key: str, args: dict
     return _TurnContext(session, in_attempt, earlier, prev, digest)
 
 
+async def _prepare_session_turn_node(
+    engine: WorkflowEngine,
+    run: WorkflowRun,
+    node: WorkflowNode,
+    epoch: int,
+    *,
+    turn_ctx: _TurnContext,
+    saved: WorkflowNode | None,
+    asked_args: dict[str, object],
+) -> tuple[DelegationChild | None, WorkflowNode] | NodeReceipt:
+    if is_sandboxed_workflow_request(turn_ctx.session.request):
+        turn_msg = str(asked_args["message"])
+    else:
+        mail = partial(
+            session_turn_message,
+            engine.store,
+            run.run_id,
+            turn_ctx.session,
+            node.key,
+            node.generation,
+            str(asked_args["message"]),
+        )
+        turn_msg = await asyncio.to_thread(mail, prev_turn=turn_ctx.prev)
+    try:
+        follow_up, prompt = await _prepare_turn(engine, run, turn_ctx, saved, turn_msg)
+    except AgentNodeError as exc:
+        failed = replace(
+            node,
+            state=WorkflowNodeState.FAILED,
+            error={"kind": "refused", "message": str(exc)},
+            ended_at=node.started_at,
+        )
+        return receipt(await asyncio.to_thread(engine.store.put_node, failed, epoch, dirty_after=True))
+    return follow_up, replace(node, request={**asked_args, "prompt": prompt, "effective_message": turn_msg})
+
+
 async def _prepare_turn(
     engine: WorkflowEngine,
     run: WorkflowRun,
@@ -579,9 +623,14 @@ async def _prepare_turn(
                 return child, message
     if not completed:
         return None, message
+    sandboxed_session = is_sandboxed_workflow_request(turn_ctx.session.request)
     history = [
         (
-            str(turn.request.get("effective_message") or turn.request["message"]),
+            str(
+                turn.request["message"]
+                if sandboxed_session
+                else (turn.request.get("effective_message") or turn.request["message"]),
+            ),
             res
             if isinstance(res := await asyncio.to_thread(engine.store.whole_result, turn), str)
             else json.dumps(res),

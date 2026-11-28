@@ -31,7 +31,13 @@ from mindroom.delegation.state import (
     SPENT_RUNS_KEY,
     SubagentPersona,
 )
-from mindroom.delegation.targets import DelegationTarget, resolve_follow_up_target, resolve_fresh_target
+from mindroom.delegation.targets import DelegationTarget, lookup_follow_up_target, resolve_fresh_target
+from mindroom.delegation.workers import (
+    schedule_subagent_worker_retirement,
+    subagent_sandbox_worker_key,
+    validate_sandbox_child,
+    validate_sandbox_execution,
+)
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
@@ -99,6 +105,9 @@ _OPTIONS = frozenset(_RENAMED) | {
     "minimal",
     "dedicated_worker",
     "resource_profile",
+    "sandbox",
+    "mount_dir",
+    "mount_read_only",
 }
 _NARROWING = frozenset({"tools", "skills", "knowledge"})
 _STOPPED_JOB_STATUSES = frozenset({"cancel_requested", "cancelled", "denied"})
@@ -178,16 +187,86 @@ async def load_follow_up_child(
     run: WorkflowRun,
     subagent_id: str,
 ) -> DelegationChild | None:
-    """Load the settled child for *subagent_id*, or return None when continuation is refused."""
+    """Load the settled child for *subagent_id*; return None if its session is gone, raise AgentNodeError if refused."""
     owner = parse_tool_execution_identity_payload(run.execution_identity)
-    target = await resolve_follow_up_target(
+    lookup = await lookup_follow_up_target(
         {"subagent_id": subagent_id, "message": ""},
         owner=owner,
         config=context.current_config,
         runtime_paths=context.runtime_paths,
         depth=run.depth,
     )
-    return None if isinstance(target, str) else target.previous_child
+    if lookup.target is not None:
+        return lookup.target.previous_child
+    if lookup.unavailable:
+        return None
+    raise AgentNodeError(lookup.refusal or "Follow-up subagent cannot be continued.")
+
+
+def _validate_workflow_sandbox_turn(
+    *,
+    caller: str,
+    target: DelegationTarget,
+    previous: DelegationChild | None,
+    correction: str | None,
+    owner: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> None:
+    if (
+        previous is not None
+        and correction is not None
+        and (previous.dedicated_worker, previous.worker_resource_profile, previous.worker_sandbox)
+        != (target.dedicated_worker, target.resource_profile, target.sandbox)
+    ):
+        msg = "Workflow agent worker placement no longer matches its previous turn."
+        raise AgentNodeError(msg)
+    refusal = (
+        validate_sandbox_child(previous, config, runtime_paths, caller_name=caller)
+        if previous is not None
+        else (
+            validate_sandbox_execution(
+                caller_name=caller,
+                child_name=target.agent_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=replace(owner, agent_name=target.agent_name),
+                sandbox=target.sandbox,
+                resource_profile=target.resource_profile,
+                agent_mode=target.agent_mode,
+                persona=target.persona,
+                delegation_depth=depth + 1,
+            )
+            if target.sandbox is not None
+            else None
+        )
+    )
+    if refusal is not None:
+        raise AgentNodeError(refusal)
+
+
+def _retain_spawn_sandbox_cleanup(
+    engine: WorkflowEngine,
+    run_id: str,
+    node: WorkflowNode,
+    child: DelegationChild,
+    context: ToolRuntimeContext,
+) -> None:
+    if node.kind != "turn" or child.worker_sandbox is None:
+        return
+    worker_key = subagent_sandbox_worker_key(child, context.current_config, context.runtime_paths)
+    if worker_key is None:
+        return
+    retire_paths = context.runtime_paths
+
+    async def _retire_spawn_worker(
+        paths: RuntimePaths = retire_paths,
+        key: str = worker_key,
+    ) -> None:
+        schedule_subagent_worker_retirement(paths, key)
+
+    engine.retain_worker_cleanup(run_id, worker_key, _retire_spawn_worker)
 
 
 def _prepare_turn_spec(
@@ -254,6 +333,16 @@ def _prepare_turn_spec(
         raise ScriptRuntimeUnavailableError(str(exc)) from exc
     if isinstance(authorized, str):
         raise AgentNodeError(authorized)
+    _validate_workflow_sandbox_turn(
+        caller=caller,
+        target=target,
+        previous=previous,
+        correction=correction,
+        owner=owner,
+        config=authorized,
+        runtime_paths=paths,
+        depth=run.depth,
+    )
     child = prepare_child_turn(
         caller,
         target.agent_name,
@@ -269,6 +358,7 @@ def _prepare_turn_spec(
         persona=target.persona,
         dedicated_worker=target.dedicated_worker,
         worker_resource_profile=target.resource_profile,
+        worker_sandbox=target.sandbox,
     )
     child.workflow_run_id, child.workflow_node_key, child.workflow_generation = run.run_id, node.key, node.generation
     orchestrator = context.orchestrator
@@ -413,6 +503,7 @@ async def launch_child(
         except JobAccessError as exc:
             raise AgentNodeError(str(exc)) from exc
     await job_runtime.release_wait(job_id, claim)
+    _retain_spawn_sandbox_cleanup(engine, run.run_id, node, child, context)
     node = replace(node, handle=replace(handle, dispatched=True))
     await asyncio.to_thread(store.update_node, run.run_id, node.key, node.generation, epoch, handle=node.handle)
     if session is not None:
@@ -760,6 +851,7 @@ async def _settle_turn(
     turn = int(node.links.get("turn", 1))
     made = bool(node.links.get("made")) or any(used.get("tool_calls") for _, _, used in usage)
     further = None
+    settled = False
     try:
         with suppress(SupersededAttemptError):
             add = partial(engine.store.add_usage, node.run_id, node.key, node.generation, epoch=epoch)
@@ -779,13 +871,19 @@ async def _settle_turn(
                 further = outcome
             else:
                 state, result, error = outcome
-                await engine.settle_node(node, epoch, state=state, result=result, error=error)
+                settled = await engine.settle_node(node, epoch, state=state, result=result, error=error)
             if claim is not None:
                 await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
     finally:
         # An outcome this wait did not save, because the run moved on or the wait was cancelled, is the next
         # reader's. After the acknowledgement there is no claim left to give back.
         await runtime.jobs.release_wait(node.handle.ref, claim)
+    if settled and further is None and node.kind == "agent":
+        job = runtime.jobs.retained_job(node.handle.ref)
+        child = None if job is None else delegation_child(job)
+        worker_key = None if child is None else subagent_sandbox_worker_key(child, runtime.config, runtime.paths)
+        if worker_key is not None:
+            schedule_subagent_worker_retirement(runtime.paths, worker_key)
     return further
 
 

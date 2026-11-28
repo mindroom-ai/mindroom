@@ -95,6 +95,23 @@ def _skill_document(skill: Skill, policy: ToolOutputFilePolicy) -> str:
     return f"{skill.name}\nDirectory: {directory.as_posix()}\n\n{skill.instructions}"
 
 
+def _minimal_sandbox_note(build: AgentBuild) -> str:
+    sandbox = build.surface.worker_sandbox
+    assert sandbox is not None
+    if sandbox.mount_dir is None:
+        mount_line = "Workspace: isolated scratch directory only (no agent workspace files are mounted)."
+    elif sandbox.mount_read_only:
+        mount_line = f"Workspace: mounted subdirectory `{sandbox.mount_dir}` (read-only)."
+    else:
+        mount_line = f"Workspace: mounted subdirectory `{sandbox.mount_dir}` (read-write)."
+    return (
+        "Bash is your only tool and runs inside an isolated Kubernetes sandbox.\n"
+        f"{mount_line}\n"
+        "No credentials, memory, knowledge bases, skills, shared directories, workspace outside the mounted "
+        "directory, or external CLI exist in this sandbox."
+    )
+
+
 def minimal_turn(
     build: AgentBuild,
     *,
@@ -107,9 +124,24 @@ def minimal_turn(
 
     Only enrichment marked ``minimal_required`` reaches the model directly: system items in the turn part after the
     date and session context, transient ones in the transient context. Everything else, memory included, is a context
-    document.
+    document. Sandboxed minimal turns render only the allowlisted sandbox prompt and drop all ambient context.
     """
     surface = build.surface
+    if surface.worker_sandbox is not None:
+        bootstrap = minimal_system_message(
+            agent_name=build.spec.id,
+            display_name=build.spec.name,
+            identity=surface.identity,
+            toolkit_names=(),
+            instructions=(),
+            sandbox_note=_minimal_sandbox_note(build),
+        )
+        turn = join_sections((build.prompt.turn_context,))
+        return MinimalTurn(
+            system_messages=tuple(Message(role="system", content=text) for text in (bootstrap, turn) if text),
+            transient_context="",
+            context_documents={},
+        )
     bootstrap = minimal_system_message(
         agent_name=build.spec.id,
         display_name=build.spec.name,
@@ -139,7 +171,13 @@ def minimal_turn(
 
 def presented_build(build: AgentBuild) -> AgentBuild:
     """Return ``build`` as a minimal turn's requests present it: the Bash facade is its only tool."""
-    return replace(build, spec=replace(build.spec, toolkits=(minimal_bash_toolkit(),)))
+    return replace(
+        build,
+        spec=replace(
+            build.spec,
+            toolkits=(minimal_bash_toolkit(sandboxed=build.surface.worker_sandbox is not None),),
+        ),
+    )
 
 
 def _failure(build: AgentBuild, delegation_depth: int, reason: str) -> str:
@@ -199,9 +237,10 @@ def bind_minimal_owner(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> LiveTurnTools:
     """Bind the real managed turn to ``catalog``: its owner and grant on the first attempt, its catalog afterwards."""
+    sandbox_only = build.surface.worker_sandbox is not None
     lifetime = current_cli_lifetime()
     runtime = catalog.runtime_context
-    if lifetime is None or runtime.orchestrator is None:
+    if lifetime is None or (not sandbox_only and runtime.orchestrator is None):
         msg = "Minimal Bash requires an active managed response owner"
         raise RuntimeError(msg)
     return bind_response_owner(
@@ -213,6 +252,7 @@ def bind_minimal_owner(
         delegation_depth=delegation_depth,
         refresh_scheduler=refresh_scheduler,
         reload_ends_run=True,
+        sandbox_only=sandbox_only,
     )
 
 
@@ -233,9 +273,10 @@ async def minimal_attempt(
     Each provider batch is checkpointed before its Bash calls run. The build's tool policy runs around the calls
     Bash makes through the CLI, not around Bash itself.
     """
+    sandbox_only = build.surface.worker_sandbox is not None
     lifetime = current_cli_lifetime()
     runtime = get_tool_runtime_context()
-    if lifetime is None or runtime is None or runtime.orchestrator is None:
+    if lifetime is None or runtime is None or (not sandbox_only and runtime.orchestrator is None):
         raise MinimalModeUnavailableError(
             _failure(build, delegation_depth, "Minimal Bash requires an active managed response owner"),
         )
@@ -258,6 +299,6 @@ async def minimal_attempt(
         await catalog.close()
         _raise_failure(build, delegation_depth, exc)
     return (
-        replace(spec, toolkits=(minimal_bash_toolkit(owner.execute_bash),)),
+        replace(spec, toolkits=(minimal_bash_toolkit(owner.execute_bash, sandboxed=sandbox_only),)),
         replace(hooks, tool_middleware=(), before_dispatch=owner.checkpoint.capture),
     )

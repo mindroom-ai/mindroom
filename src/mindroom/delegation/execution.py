@@ -52,6 +52,7 @@ from mindroom.delegation.state import (
 )
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
+from mindroom.delegation.workers import validate_sandbox_child, validate_sandbox_execution
 from mindroom.failure_text import failure_text
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
@@ -89,6 +90,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.turn_model import ModelScope, resolve_turn_model
+from mindroom.workers.placements import placement_for_session
 
 logger = get_logger(__name__)
 
@@ -329,6 +331,16 @@ async def _execute_child(
     if persisted.status != RunStatus.paused or approval_calls is None:
         # A retained pause must never acquire ownership from a later reconstruction.
         return _ChildOutcome(persisted, {})
+    if child.worker_sandbox is not None:
+        active_placement = placement_for_session(child.session_id)
+        if (
+            active_placement is None
+            or active_placement.subagent_id != child.subagent_id
+            or active_placement.resource_profile != child.worker_resource_profile
+            or active_placement.sandbox != child.worker_sandbox
+        ):
+            msg = "Sandboxed subagent placement does not match its retained child before approval resume"
+            raise RuntimeError(msg)
     approved_calls = own_approved_calls(persisted, approval_calls)
     required_tool_names = await required_approval_tool_names(
         child.child_agent_name,
@@ -338,7 +350,11 @@ async def _execute_child(
         tools=context.plugins.tools,
         execution_identity=identity,
         delegation_depth=child.depth,
-        runtime_toolkits=("workflow_peers",) if child.workflow_run_id and child.workflow_node_key else (),
+        runtime_toolkits=(
+            ("workflow_peers",)
+            if child.workflow_run_id and child.workflow_node_key and child.worker_sandbox is None
+            else ()
+        ),
     )
     await settle_child_response(
         child,
@@ -347,13 +363,19 @@ async def _execute_child(
         runtime_paths=runtime_paths,
         approval_calls=approval_calls,
     )
-    knowledge = await resolve_agent_knowledge_access_async(
-        child.child_agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=identity,
-        only=child.persona.kept_knowledge if child.persona is not None else None,
+    knowledge = (
+        None
+        if child.worker_sandbox is not None
+        else (
+            await resolve_agent_knowledge_access_async(
+                child.child_agent_name,
+                config,
+                runtime_paths,
+                refresh_scheduler=refresh_scheduler,
+                execution_identity=identity,
+                only=child.persona.kept_knowledge if child.persona is not None else None,
+            )
+        ).knowledge
     )
     store, session = await run_session_storage_operation(
         partial(create_session_storage, child.child_agent_name, config, runtime_paths, execution_identity=identity),
@@ -374,7 +396,7 @@ async def _execute_child(
             ModelScope(entity=child.child_agent_name, explicit=child.model_name),
             None,
         ),
-        knowledge=knowledge.knowledge,
+        knowledge=knowledge,
         plugins=context.plugins,
         refresh_scheduler=refresh_scheduler,
         delegation_depth=child.depth,
@@ -383,6 +405,7 @@ async def _execute_child(
         tool_function_filter=context.tool_function_filter,
         required_tool_names=required_tool_names,
         persona=child.persona,
+        worker_sandbox=child.worker_sandbox,
     )
     toolkit_owners = tool_owners_by_agent(build)
     validate_approval_tool_owners(toolkit_owners, approved_calls, pending_approval_requirements(persisted))
@@ -878,6 +901,18 @@ def _validate_child_scope(
     ):
         msg = "Delegation child no longer matches its parent requirement"
         raise RuntimeError(msg)
+    expected_worker = (
+        (
+            target.previous_child.dedicated_worker,
+            target.previous_child.worker_resource_profile,
+            target.previous_child.worker_sandbox,
+        )
+        if target.previous_child is not None
+        else (target.dedicated_worker, target.resource_profile, target.sandbox)
+    )
+    if (child.dedicated_worker, child.worker_resource_profile, child.worker_sandbox) != expected_worker:
+        msg = "Delegation child worker placement no longer matches its parent requirement"
+        raise RuntimeError(msg)
 
 
 async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -985,6 +1020,30 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         depth=delegation_depth,
         model=target.model,
     )
+    if not isinstance(authorization, str):
+        sandbox_source = retained or target.previous_child
+        sandbox_refusal = (
+            validate_sandbox_child(sandbox_source, authorization, runtime_paths, caller_name=caller)
+            if sandbox_source is not None
+            else (
+                validate_sandbox_execution(
+                    caller_name=caller,
+                    child_name=target.agent_name,
+                    config=authorization,
+                    runtime_paths=runtime_paths,
+                    execution_identity=replace(caller_identity, agent_name=target.agent_name),
+                    sandbox=target.sandbox,
+                    resource_profile=target.resource_profile,
+                    agent_mode=target.agent_mode,
+                    persona=target.persona,
+                    delegation_depth=delegation_depth + 1,
+                )
+                if target.sandbox is not None
+                else None
+            )
+        )
+        if sandbox_refusal is not None:
+            authorization = sandbox_refusal
     output_request = None
     if not isinstance(authorization, str):
         prepared_output = _prepare_delegation_output(
@@ -1085,6 +1144,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
             persona=target.persona,
             dedicated_worker=target.dedicated_worker,
             worker_resource_profile=target.resource_profile,
+            worker_sandbox=target.sandbox,
         )
         state.children.append(child)
     # The liveness claim spans the child's run and its settlement, so recovery never takes the child mid-failure.

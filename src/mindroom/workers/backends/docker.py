@@ -503,6 +503,12 @@ class _WorkerContainerState:
     mounts: list[tuple[Path, str, bool]]
 
 
+def _require_unsandboxed_docker_spec(spec: WorkerSpec) -> None:
+    if spec.sandbox is not None:
+        msg = "Sandboxed workers require the kubernetes worker backend."
+        raise WorkerBackendError(msg)
+
+
 class DockerWorkerBackend(WorkerBackendDefaults):
     """Docker-backed worker provider for dedicated local sandbox-runner containers."""
 
@@ -603,6 +609,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
         """Resolve or start the worker container for one worker key, from the launch applied once its lock is held."""
+        _require_unsandboxed_docker_spec(spec)
         timestamp = time.time() if now is None else now
         # A caller waiting behind another's start of this worker is sent that start's progress.
         with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):

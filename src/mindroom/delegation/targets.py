@@ -20,7 +20,12 @@ from mindroom.delegation.personas import (
 from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import SUBAGENT_PREFIX_PATTERN, SubagentSessionError, resolve_subagent_id
 from mindroom.delegation.state import CONTINUE_SUBAGENT, display_title
-from mindroom.delegation.workers import dedicated_worker_refusal
+from mindroom.delegation.workers import (
+    dedicated_worker_refusal,
+    parse_delegation_sandbox,
+    sandbox_persona_refusal,
+    validate_sandbox_child,
+)
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -35,7 +40,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-    from mindroom.workers.models import ScriptResourceProfileName
+    from mindroom.workers.models import ScriptResourceProfileName, WorkerSandboxConfig
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,16 @@ class DelegationTarget:
     model: str | None = None
     dedicated_worker: bool = False
     resource_profile: ScriptResourceProfileName | None = None
+    sandbox: WorkerSandboxConfig | None = None
+
+
+@dataclass(frozen=True)
+class FollowUpLookup:
+    """Outcome of looking up a follow-up subagent: resolved target, missing session, or policy/sandbox refusal."""
+
+    target: DelegationTarget | None = None
+    refusal: str | None = None
+    unavailable: bool = False
 
 
 async def resolve_delegation_target(
@@ -101,7 +116,7 @@ async def resolve_delegation_target(
     )
 
 
-async def resolve_follow_up_target(
+async def lookup_follow_up_target(
     args: Mapping[str, object],
     *,
     retained: DelegationChild | None = None,
@@ -109,14 +124,11 @@ async def resolve_follow_up_target(
     config: Config,
     runtime_paths: RuntimePaths,
     depth: int,
-) -> DelegationTarget | str:
-    """Resolve a follow-up to the child ``owner`` continues, which keeps its model, mode, and persona.
-
-    The follow-up needs the child's settled state, so an abandoned child turn is recovered before this returns.
-    """
+) -> FollowUpLookup:
+    """Resolve a follow-up child while distinguishing unavailable session files from permission/sandbox refusals."""
     subagent_id, task = args.get("subagent_id"), args.get("message")
     if not isinstance(subagent_id, str) or not isinstance(task, str):
-        return "Cannot continue: subagent_id and message must be strings."
+        return FollowUpLookup(refusal="Cannot continue: subagent_id and message must be strings.")
     if retained is not None:
         # A resumed call continues the child it started, whatever the caller's tools are now.
         if retained.subagent_id != subagent_id and not (
@@ -124,7 +136,16 @@ async def resolve_follow_up_target(
         ):
             msg = "Subagent ID no longer matches its retained requirement"
             raise RuntimeError(msg)
-        return DelegationTarget(retained.child_agent_name, task, previous_child=retained)
+        return FollowUpLookup(
+            target=DelegationTarget(
+                retained.child_agent_name,
+                task,
+                previous_child=retained,
+                dedicated_worker=retained.dedicated_worker,
+                resource_profile=retained.worker_resource_profile,
+                sandbox=retained.worker_sandbox,
+            ),
+        )
     try:
         resolved_id = await resolve_subagent_id(subagent_id, owner=owner, runtime_paths=runtime_paths, depth=depth)
         previous_child = await load_settled_subagent(
@@ -135,7 +156,7 @@ async def resolve_follow_up_target(
             depth=depth,
         )
     except SubagentSessionError as error:
-        return str(error)
+        return FollowUpLookup(refusal=str(error), unavailable=True)
     live_config = live_delegation_config(config)
     refusal = follow_up_refusal(
         previous_child.persona,
@@ -145,8 +166,50 @@ async def resolve_follow_up_target(
         delegation_depth=depth,
     )
     if refusal is not None:
-        return refusal
-    return DelegationTarget(previous_child.child_agent_name, task, previous_child=previous_child)
+        return FollowUpLookup(refusal=refusal)
+    if (
+        sandbox_refusal := validate_sandbox_child(
+            previous_child,
+            live_config,
+            runtime_paths,
+            caller_name=owner.agent_name,
+        )
+    ) is not None:
+        return FollowUpLookup(refusal=sandbox_refusal)
+    return FollowUpLookup(
+        target=DelegationTarget(
+            previous_child.child_agent_name,
+            task,
+            previous_child=previous_child,
+            dedicated_worker=previous_child.dedicated_worker,
+            resource_profile=previous_child.worker_resource_profile,
+            sandbox=previous_child.worker_sandbox,
+        ),
+    )
+
+
+async def resolve_follow_up_target(
+    args: Mapping[str, object],
+    *,
+    retained: DelegationChild | None = None,
+    owner: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> DelegationTarget | str:
+    """Resolve a follow-up to the child ``owner`` continues, which keeps its model, mode, persona, and sandbox."""
+    lookup = await lookup_follow_up_target(
+        args,
+        retained=retained,
+        owner=owner,
+        config=config,
+        runtime_paths=runtime_paths,
+        depth=depth,
+    )
+    if lookup.target is not None:
+        return lookup.target
+    assert lookup.refusal is not None
+    return lookup.refusal
 
 
 def resolve_fresh_target(
@@ -163,22 +226,47 @@ def resolve_fresh_target(
     """Resolve a fresh child and any persona it authors; a started child keeps its frozen persona.
 
     ``workspace_root`` returns the caller's workspace, resolved only to read a profile or the caller's skills, and
-    ``cap`` is the persona of the authored subagent making the call, if any.
+    ``cap`` is the persona of the authored subagent making the call, if any. On-disk ``mount_dir`` existence is
+    intentionally NOT checked here; callers validate it via ``validate_sandbox_execution`` after authorization.
     """
     child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
     model, title = cast("str | None", args.get("model")), args.get("title")
     if child_name is None:
         child_name = caller_name
-    if refusal := _option_refusal(minimal, title):
-        return refusal
-    if not isinstance(child_name, str) or not isinstance(task, str):
-        return "Cannot delegate: task must be a string and agent_name must be a string or null."
+    header_error = _option_refusal(minimal, title) or (
+        None
+        if isinstance(child_name, str) and isinstance(task, str)
+        else "Cannot delegate: task must be a string and agent_name must be a string or null."
+    )
+    if header_error is not None:
+        return header_error
+    assert isinstance(child_name, str)
+    assert isinstance(task, str)
+    parsed = parse_delegation_sandbox(args, runtime_paths=runtime_paths)
+    if isinstance(parsed, str):
+        return parsed
+    dedicated_worker, resource_profile, sandbox = parsed
     if retained is not None:
-        # A resumed call never rereads a profile the worker could have changed.
-        return DelegationTarget(child_name, task, model=model)
-    worker = _dedicated_worker_request(args, caller_name=caller_name, config=config, runtime_paths=runtime_paths)
-    if isinstance(worker, str):
-        return worker
+        # A resumed call never rereads a profile the worker could have changed, while preserving its request placement.
+        return DelegationTarget(
+            child_name,
+            task,
+            model=model,
+            dedicated_worker=dedicated_worker,
+            resource_profile=resource_profile,
+            sandbox=sandbox,
+        )
+    if dedicated_worker and (
+        refusal := dedicated_worker_refusal(
+            caller_name,
+            live_delegation_config(config),
+            runtime_paths,
+            resource_profile=resource_profile,
+            sandbox=sandbox,
+            child_name=child_name,
+        )
+    ):
+        return refusal
     request = resolve_persona_request(
         caller_name=caller_name,
         agent_name=child_name,
@@ -206,9 +294,14 @@ def resolve_fresh_target(
         available_knowledge=lambda: caller_knowledge_names(caller_name, live_delegation_config(config)),
         cap=cap,
     )
-    if isinstance(request, str):
-        return request
-    dedicated_worker, resource_profile = worker
+    refusal = (
+        request
+        if isinstance(request, str)
+        else (sandbox_persona_refusal(request.persona, request.agent_mode) if sandbox is not None else None)
+    )
+    if refusal is not None:
+        return refusal
+    assert not isinstance(request, str)
     return DelegationTarget(
         child_name,
         task,
@@ -219,6 +312,7 @@ def resolve_fresh_target(
         model=request.model,
         dedicated_worker=dedicated_worker,
         resource_profile=resource_profile,
+        sandbox=sandbox,
     )
 
 
@@ -229,29 +323,3 @@ def _option_refusal(minimal: object, title: object) -> str | None:
     if title is not None and (not isinstance(title, str) or not title.strip()):
         return "Cannot delegate: title must name the task in a few words."
     return None
-
-
-def _dedicated_worker_request(
-    args: Mapping[str, object],
-    *,
-    caller_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> tuple[bool, ScriptResourceProfileName | None] | str:
-    """Read whether a fresh child asks for its own worker, and with which resource profile, or return a refusal."""
-    dedicated_worker, resource_profile = args.get("dedicated_worker"), args.get("resource_profile")
-    if dedicated_worker is not None and not isinstance(dedicated_worker, bool):
-        return "Cannot delegate: dedicated_worker must be a boolean or null."
-    if resource_profile is not None and not dedicated_worker:
-        return "Cannot delegate: resource_profile requires dedicated_worker=true."
-    if not dedicated_worker:
-        return False, None
-    refusal = dedicated_worker_refusal(
-        caller_name,
-        live_delegation_config(config),
-        runtime_paths,
-        resource_profile=resource_profile,
-    )
-    if refusal is not None:
-        return refusal
-    return True, cast("ScriptResourceProfileName | None", resource_profile)

@@ -60,9 +60,12 @@ class WorkerLaunchConfig:
     worker_preload_plugins: tuple[str, ...] = field(default=(), compare=False)
 
 
+SANDBOX_ALLOWED_TOOLKITS = frozenset({"shell", "filesystem"})
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSandboxConfig:
-    """Sandbox isolation for a named worker: optional workspace-relative directory mount and read-only flag."""
+    """Sandbox isolation for a worker: optional workspace-relative directory mount and read-only flag."""
 
     mount_dir: str | None = None
     mount_read_only: bool = False

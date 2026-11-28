@@ -52,6 +52,9 @@ from mindroom.workers.models import (
     SCRIPT_RESOURCE_PROFILE_NAMES,
     WORKER_SSH_PORT,
 )
+from mindroom.workers.sandbox_mounts import (  # noqa: F401 - Re-exported for kubernetes backend modules.
+    sandbox_mount_dir_runtime_class_refusal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -677,15 +680,6 @@ def configured_named_workers_max(runtime_paths: RuntimePaths) -> int:
 def configured_runtime_class_name(runtime_paths: RuntimePaths) -> str | None:
     """Read the configured Kubernetes RuntimeClass name without loading the full backend config."""
     return read_env(runtime_env_values(runtime_paths), _RUNTIME_CLASS_NAME_ENV) or None
-
-
-def sandbox_mount_dir_runtime_class_refusal(runtime_class_name: str) -> str:
-    """Return the refusal message when sandbox ``mount_dir`` is requested under a RuntimeClass."""
-    return (
-        f"mount_dir is not supported when workers.kubernetes.runtimeClassName is set ({runtime_class_name!r}) "
-        "because runtimes such as gVisor do not preserve host inode numbers for mount verification; "
-        "use sandbox=true without mount_dir."
-    )
 
 
 def kubernetes_backend_config_signature(

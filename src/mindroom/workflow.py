@@ -329,8 +329,11 @@ def agent(
     minimal: bool = False,
     timeout: float | None = None,
     output_path: str | None = None,
-    dedicated_worker: bool = False,
+    dedicated_worker: bool | None = None,
     resource_profile: str | None = None,
+    sandbox: bool | None = None,
+    mount_dir: str | None = None,
+    mount_read_only: bool | None = None,
     **unknown: object,
 ) -> object:
     """Run one agent turn and return its answer.
@@ -342,7 +345,8 @@ def agent(
     `system`, `tools`, `skills`, `knowledge` or `profile` (a `subagents/<profile>.md` file) shape a copy of the owner.
     `model` is any configured model name, such as "haiku" or "opus@high".
     `name` labels the node and is the address other agents message; it does not select an agent.
-    `output_path` also writes the answer to that workspace file; `dedicated_worker` and `resource_profile` are those of run_subagent.
+    `output_path` also writes the returned answer to that caller-workspace file on the primary;
+    `dedicated_worker`, `resource_profile`, `sandbox`, `mount_dir`, and `mount_read_only` match run_subagent.
     Raises AgentError when the turn fails, is cancelled, is denied, or times out after `timeout` seconds.
     """
     _current_lane()
@@ -365,6 +369,9 @@ _SHARED_OPTIONS = (
     "output_path",
     "dedicated_worker",
     "resource_profile",
+    "sandbox",
+    "mount_dir",
+    "mount_read_only",
 )
 
 
@@ -375,11 +382,39 @@ def _agent_options(
     *,
     extra: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
-    """Validate *unknown* and return the non-default agent options from *values*; empty lists are kept."""
+    """Validate *unknown* and return the non-default agent options from *values*; empty lists are kept.
+
+    Existing defaults (`minimal=False`, lone `dedicated_worker=False`, lone `sandbox=False`/`mount_read_only=False`)
+    are omitted so replay digests stay unchanged, while contradictory combinations (such as
+    `dedicated_worker=False, sandbox=True` or `sandbox=False, mount_dir="repo"`) travel to the engine and are refused.
+    """
     allowed = frozenset(_SHARED_OPTIONS) | extra
     _check_options(function, unknown, allowed)
     keys = (*_SHARED_OPTIONS, "name") if "name" in extra else _SHARED_OPTIONS
-    return {k: values[k] for k in keys if values[k] is not None and values[k] is not False}
+    has_worker_option = any(
+        values.get(opt) is not None for opt in ("resource_profile", "sandbox", "mount_dir", "mount_read_only")
+    )
+    has_sandbox_target = values.get("mount_dir") is not None or values.get("mount_read_only") is True
+    out: dict[str, object] = {}
+    for k in keys:
+        value = values[k]
+        if value is None:
+            continue
+        if k == "minimal" and value is False:
+            continue
+        if k == "dedicated_worker" and value is False and not has_worker_option:
+            continue
+        if k == "sandbox" and value is False and not has_sandbox_target:
+            continue
+        if (
+            k == "mount_read_only"
+            and value is False
+            and values.get("mount_dir") is None
+            and values.get("sandbox") is not True
+        ):
+            continue
+        out[k] = value
+    return out
 
 
 class Session:
@@ -412,8 +447,11 @@ def spawn(
     profile: str | None = None,
     minimal: bool = False,
     output_path: str | None = None,
-    dedicated_worker: bool = False,
+    dedicated_worker: bool | None = None,
     resource_profile: str | None = None,
+    sandbox: bool | None = None,
+    mount_dir: str | None = None,
+    mount_read_only: bool | None = None,
     **unknown: object,
 ) -> Session:
     """Create an agent that keeps its conversation; takes the options of agent() except prompt, schema and timeout."""

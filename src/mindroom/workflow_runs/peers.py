@@ -17,7 +17,7 @@ from mindroom.workflow_runs.store import WorkflowRunStore, WorkflowRunStoreError
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Callable, Collection, Iterable
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
 MAX_PEER_BYTES = 1024 * 1024
 _NAME_CHARS = 80
@@ -267,6 +267,11 @@ def script_op(
     raise WorkflowRunStoreError(msg)
 
 
+def is_sandboxed_workflow_request(request: Mapping[str, object]) -> bool:
+    """Return whether a workflow `agent`/`session` request runs in a sandbox (no peer inbox or tools)."""
+    return request.get("sandbox") is True or request.get("mount_dir") is not None
+
+
 def session_turn_message(
     store: WorkflowRunStore,
     run_id: str,
@@ -278,6 +283,8 @@ def session_turn_message(
     prev_turn: WorkflowNode | None = None,
 ) -> str:
     """Seed `(turn_key, turn_gen)` from *prev_turn*'s ending cursor, drain between-turn mail, and format."""
+    if is_sandboxed_workflow_request(session.request):
+        return message
     with store.write_transaction() as conn:
         seed = 0
         if prev_turn is not None:

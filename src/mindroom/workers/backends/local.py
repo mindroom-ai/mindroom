@@ -275,6 +275,9 @@ class _LocalWorkerBackend(WorkerBackendDefaults):
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
         """Resolve or create one local worker."""
+        if spec.sandbox is not None:
+            msg = "Sandboxed workers require the kubernetes worker backend."
+            raise WorkerBackendError(msg)
         del progress_sink
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(spec.worker_key, worker_root=self.worker_root)
