@@ -17,6 +17,7 @@ from mindroom import background_tasks, requester_identity
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.automations import automation
 from mindroom.automations import runner as runner_module
+from mindroom.automations.builtins import resolve_automation_definition
 from mindroom.automations.registry import AutomationDefinition, compile_automations
 from mindroom.automations.runner import AutomationRunner
 from mindroom.automations.steps import Ask, AutomationContext, Done
@@ -119,6 +120,12 @@ class _Bot:
         return f"$event{len(self.sent)}"
 
 
+def _provider(*plugins: _Plugin) -> Callable[[str], AutomationDefinition | None]:
+    """Resolve definitions against one compiled plugin snapshot, with built-ins always available."""
+    catalog = compile_automations(plugins)
+    return lambda name: resolve_automation_definition(name, catalog)
+
+
 def _setup(
     tmp_path: Path,
     *,
@@ -144,7 +151,7 @@ def _setup(
         runtime_paths=paths,
         config_provider=lambda: config,
         bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
-        definition_provider=compile_automations([]).get,
+        definition_provider=_provider(),
         agent_reply_memberships=AgentReplyMembershipIndex(),
     )
     return config, paths, runner, bot
@@ -694,7 +701,7 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
         runtime_paths=paths,
         config_provider=lambda: config,
         bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
-        definition_provider=compile_automations([]).get,
+        definition_provider=_provider(),
         agent_reply_memberships=AgentReplyMembershipIndex(),
     )
 
@@ -786,7 +793,7 @@ async def test_a_plugin_automation_runs_its_chain_through_the_runner(tmp_path: P
         )
 
     _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST])
-    runner.definition_provider = compile_automations([_Plugin("digest", check, settings={"api": "x"})]).get
+    runner.definition_provider = _provider(_Plugin("digest", check, settings={"api": "x"}))
     with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
@@ -809,7 +816,7 @@ async def test_a_plugin_automation_runs_its_chain_through_the_runner(tmp_path: P
 async def test_an_entry_no_loaded_plugin_provides_is_skipped(tmp_path: Path) -> None:
     """A missing plugin posts nothing and frees the agent; the occurrence is consumed, so the next one is tomorrow."""
     _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST])
-    runner.definition_provider = compile_automations([]).get
+    runner.definition_provider = _provider()
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
 
@@ -824,7 +831,7 @@ async def test_an_automation_needing_file_memory_is_skipped_on_another_backend(t
     calls: list[str] = []
     check = automation("weekly_digest", requires_file_memory=True)(lambda ctx: calls.append(ctx.agent_name))
     _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST], memory_backend="mem0")
-    runner.definition_provider = compile_automations([_Plugin("digest", check)]).get
+    runner.definition_provider = _provider(_Plugin("digest", check))
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
 
@@ -838,16 +845,12 @@ async def test_a_reload_between_steps_keeps_the_running_chain(tmp_path: Path) ->
     old = Ask("Old prompt", new_thread=True, then=lambda _config, _thread, _timed_out: Done("old step"))
     new = Ask("New prompt", new_thread=True, then=lambda _config, _thread, _timed_out: Done("new step"))
     _config, _paths, runner, bot = _setup(tmp_path, automations=[DIGEST])
-    runner.definition_provider = compile_automations(
-        [_Plugin("digest", automation("weekly_digest")(lambda _ctx: old))],
-    ).get
+    runner.definition_provider = _provider(_Plugin("digest", automation("weekly_digest")(lambda _ctx: old)))
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     due = runner._next_due["mind:weekly_digest"]
 
-    runner.definition_provider = compile_automations(
-        [_Plugin("digest", automation("weekly_digest")(lambda _ctx: new))],
-    ).get
+    runner.definition_provider = _provider(_Plugin("digest", automation("weekly_digest")(lambda _ctx: new)))
     await _tick(runner, DAY_LATER + timedelta(minutes=1))
     runner.response_finished(["$event1"])
     assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
@@ -871,7 +874,7 @@ async def test_a_check_cannot_change_nested_options_or_settings_for_later_runs(t
         return None
 
     _config, _paths, runner, _bot = _setup(tmp_path, automations=[entry])
-    runner.definition_provider = compile_automations([_Plugin("digest", check, settings={"tags": []})]).get
+    runner.definition_provider = _provider(_Plugin("digest", check, settings={"tags": []}))
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     await _tick(runner, DAY_LATER + timedelta(days=1))
@@ -930,7 +933,7 @@ def _private_setup(
         runtime_paths=paths,
         config_provider=lambda: config,
         bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
-        definition_provider=compile_automations([]).get,
+        definition_provider=_provider(),
         agent_reply_memberships=AgentReplyMembershipIndex(),
     )
     return config, paths, runner, bot, roots

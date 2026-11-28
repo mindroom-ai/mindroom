@@ -69,7 +69,6 @@ from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
 from mindroom.api.usage_export import close_usage_export_runner
-from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import maintain_leased_workers
 from mindroom.api.workers import router as workers_router
 from mindroom.api.workflow_gateway import bind_workflow_engine
@@ -79,6 +78,7 @@ from mindroom.call_transcripts.routes import router as call_transcripts_router
 from mindroom.config.commit import ConfigCommit
 from mindroom.config.personal_agents import personal_agent_data
 from mindroom.embeddings.embedder_health import get_embedder_failure
+from mindroom.http_validation import validation_error_response
 from mindroom.integrations import integration_routers
 from mindroom.knowledge_graph.store import knowledge_graph_failure
 from mindroom.logging_config import get_logger

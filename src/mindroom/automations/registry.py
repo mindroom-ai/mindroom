@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import re
 from dataclasses import dataclass, field
-from functools import cache
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.config.automations import BUILTIN_AUTOMATION_NAMES
@@ -91,35 +91,30 @@ class AutomationDefinition:
     settings: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _definition(check: CheckFn, settings: Mapping[str, Any]) -> AutomationDefinition:
+def automation_definition(
+    check: CheckFn,
+    settings: Mapping[str, Any] = MappingProxyType({}),
+) -> AutomationDefinition:
+    """Build an automation definition from a decorated check and its plugin settings."""
     metadata = _metadata(check)
     assert metadata is not None
     return AutomationDefinition(metadata.name, check, metadata.requires_file_memory, dict(settings))
 
 
-@cache
-def _builtin_definitions() -> dict[str, AutomationDefinition]:
-    # why-lazy: the built-ins import memory and runtime modules, and plugin snapshots are built at import time.
-    from mindroom.automations.dreaming import check_dreaming  # noqa: PLC0415
-    from mindroom.automations.exploration import check_exploration  # noqa: PLC0415
-    from mindroom.automations.prompt_curation import check_curation  # noqa: PLC0415
-
-    definitions = [_definition(check, {}) for check in (check_curation, check_dreaming, check_exploration)]
-    return {definition.name: definition for definition in definitions}
-
-
 @dataclass(frozen=True)
 class AutomationCatalog:
-    """The automations loaded plugins provide, beside the built-ins, and the names registered more than once."""
+    """The automations loaded plugins provide and the names registered more than once."""
 
     plugin_definitions: Mapping[str, AutomationDefinition] = field(default_factory=dict)
     collisions: tuple[str, ...] = ()
 
     def get(self, name: str) -> AutomationDefinition | None:
-        """Return the definition for ``name``, or None when nothing provides it."""
-        if name in BUILTIN_AUTOMATION_NAMES:
-            return _builtin_definitions()[name]
+        """Return the plugin definition for ``name``, or None when no loaded plugin provides it."""
         return self.plugin_definitions.get(name)
+
+    def is_provided(self, name: str) -> bool:
+        """Return whether ``name`` is a built-in automation or provided by a loaded plugin."""
+        return name in BUILTIN_AUTOMATION_NAMES or name in self.plugin_definitions
 
 
 def compile_automations(plugins: Iterable[_AutomationPlugin]) -> AutomationCatalog:
@@ -139,7 +134,7 @@ def compile_automations(plugins: Iterable[_AutomationPlugin]) -> AutomationCatal
                 )
                 collisions.add(name)
                 continue
-            definitions[name] = _definition(check, plugin.entry_config.settings)
+            definitions[name] = automation_definition(check, plugin.entry_config.settings)
     return AutomationCatalog(definitions, tuple(sorted(collisions)))
 
 
@@ -149,7 +144,20 @@ def automation_reference_errors(config: Config, catalog: AutomationCatalog) -> l
     for agent_name, agent in config.agents.items():
         listed += [(f"agents.{agent_name}.automations", entry.name) for entry in agent.automations or []]
     errors = [
-        f"{where}: {name!r} is not provided by any loaded plugin" for where, name in listed if catalog.get(name) is None
+        f"{where}: {name!r} is not provided by any loaded plugin"
+        for where, name in listed
+        if not catalog.is_provided(name)
     ]
     errors += [f"automation {name!r} is registered more than once" for name in catalog.collisions]
     return errors
+
+
+__all__ = [
+    "AutomationCatalog",
+    "AutomationDefinition",
+    "automation",
+    "automation_definition",
+    "automation_reference_errors",
+    "compile_automations",
+    "iter_module_automations",
+]
