@@ -4075,6 +4075,10 @@
               "type": "integer",
               "description": "Stop command + process group after N seconds (<= 120 inline; null/> 120 backgrounds at 120s)."
             },
+            "workdir": {
+              "type": "string",
+              "description": "Existing directory for this call (absolute or relative to default CWD; ~ uses command HOME)."
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {

@@ -145,7 +145,8 @@ If the result is auto-saved, read the saved file rather than relying on the prev
 When `tail` or the cap leaves lines out of a successful result, it starts with a notice for each stream that lost lines, such as `[Showing the last 100 of 230 lines. Pass a larger tail, or narrow the command.]` or `[Showing the last 100 of 230 stderr lines. ...]`.
 Blank lines count as lines in a notice and in the tail; output shown whole loses only its trailing newlines, and stderr of only blank lines still gets its `Stderr:` heading.
 A result that leads with a status line keeps it first and puts the notice at the start of the stream it describes: `Exit code <code>` on a failure, `Stopped after <timeout>s.` at the timeout, and `Status: FINISHED` or `Status: RUNNING` when a background command is checked.
-The command runs in the agent's workspace, or in its workdir, and the result holds only the command's output.
+By default, the command starts in the agent's workspace or its configured workdir.
+Pass `workdir` to start a single call in a different existing directory: relative paths start from the default directory, absolute paths may be outside the workspace, and `~` or `~/...` uses the command's `HOME`.
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 A successful command saves its stdout alone, and when it also printed to stderr, the receipt gives its size as `stderr_bytes`; add `2>&1` to the command to save that text too.
 
@@ -187,7 +188,7 @@ agents:
 ```
 
 ```python
-run_shell_command("git status --short", tail=50)
+run_shell_command("git status --short", tail=50, workdir="projects/site")
 run_shell_command(["git", "status", "--short"], tail=50)
 run_shell_command(["bash", "-lc", "make test"], timeout=900)
 run_shell_command("nohup npm run dev > dev.log 2>&1 &")

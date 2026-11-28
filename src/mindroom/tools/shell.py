@@ -168,6 +168,13 @@ def shell_refuses_commands(runtime_paths: RuntimePaths, *, allow_without_worker:
     return not allow_without_worker and not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
 
 
+def _validate_shell_timeout(timeout: object) -> None:
+    """Reject a timeout that is not a positive number of seconds."""
+    if timeout is not None and (not isinstance(timeout, int | float) or timeout <= 0):
+        msg = "timeout must be a positive number of seconds; omit it for the default limit."
+        raise ValueError(msg)
+
+
 def _shell_path_prepend_entries(shell_path_prepend: str | None) -> tuple[str, ...]:
     """Parse configured shell PATH prefixes."""
     if shell_path_prepend is None:
@@ -507,6 +514,34 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 in_sandbox_request=self._in_sandbox_request,
             )
 
+        def _resolve_workdir(self, workdir: str | None, env: Mapping[str, str]) -> str | None:
+            """Resolve a command's cwd without restricting it to the workspace."""
+            if workdir is None:
+                return str(self.base_dir) if self.base_dir else None
+            if not workdir.strip() or "\0" in workdir:
+                msg = "workdir must be a non-blank path without NUL bytes."
+                raise ValueError(msg)
+            try:
+                if workdir == "~" or workdir.startswith("~/"):
+                    home = env.get("HOME") or os.path.expanduser("~")  # noqa: PTH111 - no error if the host home is unknown.
+                    # Only the leading tilde expands; extra slashes after it are not a new root.
+                    path = Path(home) / workdir[2:].lstrip("/")
+                else:
+                    path = Path(workdir)
+                if not path.is_absolute():
+                    path = (self._resolved_base_dir or Path.cwd()) / path
+                path = path.resolve(strict=True)
+                if not path.is_dir():
+                    msg = f"workdir {workdir!r} is not a directory."
+                    raise ValueError(msg)
+                if not os.access(path, os.X_OK):
+                    msg = f"workdir {workdir!r} is not searchable."
+                    raise ValueError(msg)
+            except OSError as exc:
+                msg = f"cannot use workdir {workdir!r}: {exc}"
+                raise ValueError(msg) from exc
+            return str(path)
+
         def terminal_launch(
             self,
             cwd: str | None,
@@ -543,12 +578,14 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             """
             call = inspect.signature(self.run_shell_command).bind(*args, **kwargs).arguments
             timeout = call.get("timeout")
-            if timeout is not None and (not isinstance(timeout, int | float) or timeout <= 0):
-                msg = "timeout must be a positive number of seconds; omit it for the default limit."
+            _validate_shell_timeout(timeout)
+            workdir = call.get("workdir")
+            if workdir is not None and not isinstance(workdir, str):
+                msg = "workdir must be a string path."
                 raise ValueError(msg)
             env = self._command_env(process_environ)
             argv = _shell_subprocess_args(normalize_shell_args(call["args"]), env)
-            launch = TerminalLaunch(argv=tuple(argv), env=env, cwd=str(self.base_dir) if self.base_dir else None)
+            launch = TerminalLaunch(argv=tuple(argv), env=env, cwd=self._resolve_workdir(workdir, env))
             return launch, shell_call_timeout(timeout)
 
         def _refusal(self, *, named_worker: bool) -> str | None:
@@ -612,6 +649,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             args: str | list[str],
             tail: int = 100,
             timeout: int | None = None,  # noqa: ASYNC109
+            workdir: str | None = None,
             worker: str | None = None,
             resource_profile: ScriptResourceProfileName | None = None,
             sandbox: bool | None = None,
@@ -633,6 +671,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 args: Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax).
                 tail: Output lines to return.
                 timeout: Stop command + process group after N seconds (<= 120 inline; null/> 120 backgrounds at 120s).
+                workdir: Existing directory for this call (absolute or relative to default CWD; ~ uses command HOME).
                 worker: Named worker (1-32 lowercase letters/digits/hyphens); null uses normal worker.
                 resource_profile: Named worker size (small/standard/large; set on first call; null = default).
                 sandbox: Run named worker in isolated sandbox (scratch only unless mount_dir set; no creds/secrets/CLI grants).
@@ -654,23 +693,17 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             )
             if refusal is not None:
                 return _not_started(refusal)
+            subprocess_env = self._command_env(self._process_environ)
             try:
                 command_args = normalize_shell_args(args)
+                _validate_shell_timeout(timeout)
+                cwd = self._resolve_workdir(workdir, subprocess_env)
             except ValueError as exc:
                 refused = _not_started(f"Error: {exc}")
                 if worker is not None:
                     raise
                 return refused
-            if timeout is not None and timeout <= 0:
-                # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
-                msg = "timeout must be a positive number of seconds; omit it for the default limit."
-                refused = _not_started(f"Error: {msg}")
-                if worker is not None:
-                    raise ValueError(msg)
-                return refused
-            subprocess_env = self._command_env(self._process_environ)
             argv = _shell_subprocess_args(command_args, subprocess_env)
-            cwd = str(self.base_dir) if self.base_dir else None
             output_destination, spill_policy = _shell_output_policies(allow_spill=not mount_read_only)
             scope = current_shell_background_scope()
             wait_limit = default_run_timeout_seconds()

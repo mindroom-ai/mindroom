@@ -435,7 +435,7 @@ def test_stream_io_sandbox_mount_dir_readonly_end_to_end(
     sandbox_runner_env: tuple[TestClient, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end stream_io=True with sandbox=True, mount_dir, and mount_read_only=True."""
+    """A streamed command can use a cwd outside the mount without changing its workspace."""
     client, storage_root = sandbox_runner_env
     worker_key = named_worker_key(_NORMAL_KEY, "4" * 32)
     mounted_dir = storage_root / "agents" / "code" / "workspace" / "ro_stream"
@@ -455,19 +455,49 @@ def test_stream_io_sandbox_mount_dir_readonly_end_to_end(
         ),
     )
 
+    outside = Path("/tmp").resolve()  # noqa: S108 - only used as an existing cwd, no files are written here.
     frames = _post_execute(
         client,
         worker_key=worker_key,
         base_dir="agents/code/workspace/ro_stream",
-        args=['printf "%s|%s|%s" "$(pwd)" "$(cat data.txt)" "${HTTP_PROXY:-unset}"'],
-        kwargs={"worker": "ro-stream", "mount_dir": "ro_stream", "mount_read_only": True},
+        args=['printf "%s|%s|%s" "$(pwd)" "$(cat "$MINDROOM_AGENT_WORKSPACE/data.txt")" "${HTTP_PROXY:-unset}"'],
+        kwargs={
+            "worker": "ro-stream",
+            "mount_dir": "ro_stream",
+            "mount_read_only": True,
+            "timeout": 5,
+            "workdir": str(outside),
+        },
         sandbox=True,
         stream_io=True,
     )
     assert frames[-1]["ok"] is True
     assert any(frame.get("t") == "started" for frame in frames)
     assert any(frame.get("t") == "exit" and frame.get("code") == 0 for frame in frames)
-    assert _streamed_stdout(frames) == f"{resolved_mounted_dir}|stream-data|unset"
+    assert _streamed_stdout(frames) == f"{outside}|stream-data|unset"
+
+
+@pytest.mark.parametrize("stream_io", [False, True], ids=["execute", "stream_io"])
+def test_named_worker_reports_invalid_workdir_as_a_tool_failure(
+    sandbox_runner_env: tuple[TestClient, Path],
+    stream_io: bool,
+) -> None:
+    """The runner reports the invalid directory to the caller without starting the command."""
+    client, _ = sandbox_runner_env
+    frames = _post_execute(
+        client,
+        worker_key=named_worker_key(_NORMAL_KEY, "a" * 32),
+        args=["pwd"],
+        kwargs={"worker": "bad-cwd", "timeout": 5, "workdir": "missing-workdir"},
+        sandbox=True,
+        stream_io=stream_io,
+    )
+
+    final = frames[-1]
+    assert final["ok"] is False
+    assert final["failure_kind"] == "tool"
+    assert "cannot use workdir 'missing-workdir'" in final["error"]
+    assert not any(frame.get("t") == "started" for frame in frames)
 
 
 def test_sandbox_startup_manifest_mount_inode_pinning(

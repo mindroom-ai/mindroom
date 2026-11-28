@@ -48,7 +48,7 @@ from mindroom.tool_system.output_files import (
     prepare_tool_output_file,
     with_output_files,
 )
-from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
+from mindroom.tool_system.progress import shown_progress, structured_tool_result, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome
@@ -297,8 +297,14 @@ async def test_run_shell_command_accepts_single_item_shell_command_line(tmp_path
 def test_run_shell_command_schema_accepts_string_or_string_array(tmp_path: Path) -> None:
     """The tool schema should prefer command strings before argv lists and explain shell syntax."""
     tool = _get_toolkit(tmp_path)
-    args_schema = _get_run_shell_command_function(tool).parameters["properties"]["args"]
+    parameters = _get_run_shell_command_function(tool).parameters
+    properties = parameters["properties"]
+    args_schema = properties["args"]
 
+    assert list(properties)[:4] == ["args", "tail", "timeout", "workdir"]
+    assert properties["workdir"]["type"] == "string"
+    assert parameters["required"] == ["args"]
+    assert "worker" not in properties
     assert args_schema["anyOf"] == [
         {"type": "string"},
         {"type": "array", "items": {"type": "string"}},
@@ -673,6 +679,102 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
 
     result = await entrypoint(["pwd"])
     assert result == str(tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute-outside"])
+async def test_run_shell_command_workdir_changes_only_the_command_cwd(tmp_path: Path, absolute: bool) -> None:
+    """Paths may be outside the workspace and do not change where workspace files are found."""
+    workspace = tmp_path / "workspace"
+    target = tmp_path / "elsewhere" if absolute else workspace / " build "
+    workspace.mkdir()
+    target.mkdir()
+    tool = shell_tools()(base_dir=workspace, runtime_paths=_make_runtime_paths(tmp_path), allow_without_worker=True)
+    entrypoint = tool.functions["run_shell_command"]
+
+    result = await entrypoint(
+        'printf "%s|%s" "$PWD" "$MINDROOM_AGENT_WORKSPACE"',
+        timeout=5,
+        workdir=str(target) if absolute else target.name,
+    )
+
+    assert result == f"{target.resolve()}|{workspace.resolve()}"
+    assert await entrypoint(["pwd", "-P"], timeout=5) == str(workspace.resolve())
+
+
+@pytest.mark.asyncio
+async def test_run_shell_command_relative_workdir_without_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a base directory, resolve relative to the process CWD, and leave other tilde forms literal."""
+    target = tmp_path / "~local"
+    target.mkdir()
+    entrypoint = _get_toolkit(tmp_path).functions["run_shell_command"]
+    monkeypatch.chdir(tmp_path)
+
+    assert await entrypoint(["pwd", "-P"], timeout=5, workdir=target.name) == str(target.resolve())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workdir", "home_source", "subdir"),
+    [("~", "configured", ""), ("~/~", "call", "~"), ("~// build ", "call", " build "), ("~", "ambient", "")],
+    ids=["configured-home", "call-home-literal-tilde", "call-home-extra-slash-and-spaces", "fallback-home"],
+)
+async def test_run_shell_command_workdir_uses_final_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workdir: str,
+    home_source: str,
+    subdir: str,
+) -> None:
+    """Tilde expansion follows the final subprocess HOME, not the config or ambient value in isolation."""
+    target = tmp_path / home_source / subdir
+    target.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "ambient"))
+    paths = _make_runtime_paths(tmp_path, process_env={"HOME": str(tmp_path / "configured")})
+    tool = shell_tools()(base_dir=tmp_path, runtime_paths=paths, allow_without_worker=True)
+    call_changes = {"configured": {}, "call": {"HOME": str(tmp_path / "call")}, "ambient": {"HOME": None}}
+
+    with collected_tool_environment(ToolEnvironment(values=call_changes[home_source])):
+        result = await tool.functions["run_shell_command"](["pwd", "-P"], timeout=5, workdir=workdir)
+
+    assert result == str(target.resolve())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workdir", "reason"),
+    [
+        ("", "non-blank"),
+        (" \t", "non-blank"),
+        ("path\0suffix", "NUL"),
+        ("missing", "cannot use workdir 'missing'"),
+        ("regular-file", "not a directory"),
+        ("unsearchable", "not searchable"),
+    ],
+)
+async def test_run_shell_command_refuses_invalid_workdir_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workdir: str,
+    reason: str,
+) -> None:
+    """Invalid directories produce a not-started tool error, including a directory lacking search permission."""
+    (tmp_path / "regular-file").touch()
+    blocked = tmp_path.resolve() / "unsearchable"
+    blocked.mkdir()
+    access = os.access
+    monkeypatch.setattr(os, "access", lambda path, mode: (path, mode) != (blocked, os.X_OK) and access(path, mode))
+    tool = shell_tools()(base_dir=tmp_path, runtime_paths=_make_runtime_paths(tmp_path), allow_without_worker=True)
+
+    with patch.object(type(tool), "_command_runner") as runner, structured_tool_result() as metadata:
+        result = await tool.functions["run_shell_command"](["pwd"], timeout=5, workdir=workdir)
+
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert result.content.startswith("Error:")
+    assert reason in result.content
+    assert metadata == {"not_started": True}
+    runner.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
