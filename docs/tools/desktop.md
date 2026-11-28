@@ -299,14 +299,14 @@ Locally, the bridge keeps command arguments and outcomes, including shell comman
 
 On macOS, `get_app_state` returns the app's accessibility tree with roles, names, values, bounds, and available actions, plus a screenshot of the app window.
 The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step.
-Taking a screenshot on macOS brings the selected app to the front.
+On macOS, app screenshots and actions run in the background without bringing the selected app to the front or moving the physical cursor, including when the window is covered by other windows or on another Space.
 
 `desktop_read(action=...)` provides read-only observation actions: `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
 With `return_attachment=true`, `screenshot` also returns an `att_*` handle that `matrix_message` can send in the same turn.
 
 `desktop_control(action=...)` provides control actions, which require a control lease or full control:
 
-- `launch_app` launches or foregrounds one allowlisted app.
+- `launch_app` launches one allowlisted app in the background (or unhides it if hidden) without stealing foreground focus.
 - `click_element`, `perform_action`, `scroll_element`, and `set_value` act on an element from the latest state; `set_value` works only on elements that report they are writable.
 - `click`, `double_click`, `hover`, and `drag` use coordinates from `0` to `1000` inside the app window, not raw screen pixels, and `scroll` scrolls a bounded number of pages.
 - `type_text` types up to 2,000 characters; line breaks and tabs need an element target, otherwise send Enter or Tab with `keypress`.
@@ -317,7 +317,7 @@ Pass `observation="tree"` to skip the screenshot when semantic state is enough, 
 
 Element references expire after 120 seconds or when the app's window or target element changes; when the bridge reports stale state, observe again instead of reusing the old reference or coordinate.
 Coordinate input, typing without an element, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.
-On macOS, keyboard input fails if the app has lost focus, and pointer input fails if another window, such as a notification banner, floating panel, or Picture in Picture, covers the target point.
+On macOS, app-targeted background pointer and keyboard input are delivered directly to the validated app window even when occluded, failing if the window disappears or changes geometry mid-action (element-targeted typing also checks element focus inside that app); the `primary-screen` target still posts global pointer and keyboard input to whatever window covers the point or has foreground focus.
 Windows on secondary displays are supported when the window lies on one display; move a window that spans displays fully onto one.
 
 ## Read-Only Folders

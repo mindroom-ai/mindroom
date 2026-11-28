@@ -495,6 +495,14 @@ def test_macos_window_capture_binds_process_and_exact_bounds(monkeypatch: pytest
     assert _capture_macos_window(42, DesktopRect(100, 50, 800, 600), window_id=4) is expected
     assert captured_window_ids == [3, 4]
 
+    # Nonzero layer (e.g. floating panel/sheet) is ignored in bounds-only fallback but allowed with exact window_id.
+    panel_rect = DesktopRect(200, 120, 400, 300)
+    infos.append({"pid": 42, "layer": 3, "bounds": panel_rect, "number": 7})
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        _capture_macos_window(42, panel_rect)
+    assert _capture_macos_window(42, panel_rect, window_id=7) is expected
+    assert captured_window_ids == [3, 4, 7]
+
 
 @pytest.mark.parametrize(
     ("action", "expected"),

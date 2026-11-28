@@ -220,8 +220,8 @@ class ElementActionTarget:
 
     element: AccessibilityElement
     process_id: int | None
+    window: DesktopRect
     window_id: int | None = None
-    window: DesktopRect | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,8 +509,11 @@ class MacAccessibilityBackend:
         revalidate = self._current_window_state if allow_window_fallback else self._fresh_state
         stored = revalidate(app_id, state_id)
         application = stored.application
-        if application is None or stored.window_reference is None:
+        if application is None:
             return KeyboardTarget(_primary_screen_keyboard_guard)
+        if stored.window_reference is None:
+            msg = "Accessibility target window is missing; request get_app_state again before typing."
+            raise AccessibilityError(msg)
         expected_pid = int(application.processIdentifier())
         expected_window = stored.window_reference
         expected_window_id = stored.window_id
@@ -803,19 +806,13 @@ class MacAccessibilityBackend:
         pid = int(application.processIdentifier())
         launch_date_getter = getattr(application, "launchDate", None)
         launch_date = launch_date_getter() if callable(launch_date_getter) else None
-        cache = getattr(self, "_ax_enabled_pids", None)
-        if cache is None:
-            cache = {}
-            self._ax_enabled_pids = cache
-        if pid in cache and cache[pid] == launch_date:
+        if pid in self._ax_enabled_pids and self._ax_enabled_pids[pid] == launch_date:
             return
         app_element = self._services.AXUIElementCreateApplication(pid)
-        error = self._services.AXUIElementSetAttributeValue(app_element, "AXManualAccessibility", True)
-        if error != self._services.kAXErrorSuccess:
-            self._services.AXUIElementSetAttributeValue(app_element, "AXEnhancedUserInterface", True)
-        if len(cache) >= 256:
-            cache.pop(next(iter(cache)))
-        cache[pid] = launch_date
+        self._services.AXUIElementSetAttributeValue(app_element, "AXManualAccessibility", True)
+        if len(self._ax_enabled_pids) >= 256:
+            self._ax_enabled_pids.pop(next(iter(self._ax_enabled_pids)))
+        self._ax_enabled_pids[pid] = launch_date
 
     def _collect_app_state(
         self,

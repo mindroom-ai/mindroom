@@ -635,17 +635,14 @@ def test_mac_launch_timeout_and_open_error_have_unknown_outcome(monkeypatch: pyt
 
 
 def test_mac_chromium_ax_enablement_caches_by_pid_and_launch_date(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AXManualAccessibility falls back to AXEnhancedUserInterface and invalidates cache on PID reuse."""
+    """AXManualAccessibility caches per (pid, launchDate) and never enables AXEnhancedUserInterface."""
     backend, services, workspace = _fake_mac_backend()
     monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
     services.app_attribute_errors["AXManualAccessibility"] = -25205  # kAXErrorAttributeUnsupported
 
     backend.get_app_state("com.example.Editor")
     backend.get_app_state("com.example.Editor")
-    assert services.app_attribute_calls == [
-        (("app", 42), "AXManualAccessibility", True),
-        (("app", 42), "AXEnhancedUserInterface", True),
-    ]
+    assert services.app_attribute_calls == [(("app", 42), "AXManualAccessibility", True)]
 
     # Same PID reused with a newer launchDate -> cache misses and AX enablement runs again.
     services.app_attribute_calls.clear()
@@ -1070,6 +1067,19 @@ def test_untargeted_keyboard_guard_reports_nothing_typed_when_window_changes_bef
     with pytest.raises(AccessibilityError, match="nothing was typed") as refused:
         target()
     assert type(refused.value) is AccessibilityError
+
+
+def test_prepare_keyboard_rejects_app_state_without_window_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An app-backed snapshot missing window_reference must fail rather than falling back to primary-screen."""
+    backend, _services, _workspace = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    broken = replace(backend._states[state.state_id], window_reference=None)
+    backend._states[state.state_id] = broken
+    with pytest.raises(AccessibilityError, match="stale"):
+        backend.prepare_keyboard(state.app_id, state.state_id)
+    monkeypatch.setattr(backend, "_fresh_state", lambda _app_id, _state_id: broken)
+    with pytest.raises(AccessibilityError, match="target window is missing"):
+        backend.prepare_keyboard(state.app_id, state.state_id)
 
 
 def test_primary_screen_keyboard_input_needs_no_app_focus_guard() -> None:

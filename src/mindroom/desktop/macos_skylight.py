@@ -51,11 +51,6 @@ _libs: dict[str, Any] = {}
 _symbols: dict[str, Any] = {}
 
 
-def _reset_cache() -> None:
-    _libs.clear()
-    _symbols.clear()
-
-
 def _load_library(path: str) -> Any:
     if path not in _libs:
         try:

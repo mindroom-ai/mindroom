@@ -14,10 +14,9 @@ from mindroom.desktop import macos_skylight
 
 
 @pytest.fixture(autouse=True)
-def _reset_skylight_cache() -> None:
-    macos_skylight._reset_cache()
-    yield
-    macos_skylight._reset_cache()
+def _reset_skylight_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(macos_skylight, "_libs", {})
+    monkeypatch.setattr(macos_skylight, "_symbols", {})
 
 
 def _install_fake_libs(monkeypatch: pytest.MonkeyPatch, libs: dict[str, object]) -> None:

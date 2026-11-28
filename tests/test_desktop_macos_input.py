@@ -220,6 +220,7 @@ def test_click_background_stamps_fields_primes_left_and_handles_macos27_coords(
     assert [ev["sl_fields"][0] for ev in events] == [2, 1, 2, 3, 3, 3, 3]
     assert [ev["sl_fields"][1] for ev in events] == [0, 1, 1, 1, 1, 2, 2]
     assert all(ev["sl_fields"][7] == 3 for ev in events)
+    assert len({ev["sl_fields"][58] for ev in events}) == 1
 
 
 def test_right_click_hover_scroll_and_cg_post_to_pid_fallback(
@@ -312,17 +313,17 @@ def test_drag_background_uses_subtype_zero_and_releases_on_mid_drag_failure(
 
 
 @pytest.mark.usefixtures("quartz")
-def test_type_text_background_chunks_utf16_emits_return_tab_and_guards_before_activate(
+def test_type_text_background_chunks_utf16_as_unicode_only_and_guards_before_activate(
     skylight: SimpleNamespace,
 ) -> None:
-    """Typing runs before_chunk first, activates once, chunks <=16 UTF-16 units safely, and attaches auth."""
+    """Typing runs before_chunk first, activates once, keeps CR/LF/Tab as Unicode on keycode 0, and attaches auth."""
     with pytest.raises(RuntimeError, match="refused"):
         type_text_background(42, 99, "abc", before_chunk=lambda: (_ for _ in ()).throw(RuntimeError("refused")))
     assert skylight.activations == []
     assert skylight.posts == []
 
-    # 15 ASCII chars + emoji (2 UTF-16 units) must split before the emoji without splitting its surrogate pair.
-    text = ("a" * 15) + "🙂\r\nx\ty"
+    # 15 ASCII chars + emoji (2 UTF-16 units) splits before the emoji; CR/LF/Tab stay Unicode (never Return/Tab).
+    text = ("a" * 15) + "🙂\r\nx\ty" + ("b" * 12)
     checks = 0
 
     def before_chunk() -> None:
@@ -331,17 +332,15 @@ def test_type_text_background_chunks_utf16_emits_return_tab_and_guards_before_ac
 
     type_text_background(42, 99, text, before_chunk=before_chunk)
     assert skylight.activations == [(42, 99)]  # Activated once before first chunk.
-    assert checks == 6  # 'a'*15, '🙂', Return, 'x', Tab, 'y'
+    assert checks == 3
     assert all(auth is True for _, _, auth in skylight.posts)
     downs = [ev for _, ev, _ in skylight.posts if ev["down"]]
     assert [(ev["keycode"], ev.get("unicode")) for ev in downs] == [
         (0, (15, "a" * 15)),
-        (0, (2, "🙂")),
-        (36, None),
-        (0, (1, "x")),
-        (48, None),
-        (0, (1, "y")),
+        (0, (16, "🙂\r\nx\ty" + ("b" * 9))),
+        (0, (3, "bbb")),
     ]
+    assert all(ev["keycode"] == 0 for _, ev, _ in skylight.posts)
     assert all(ev["flags"] == 0 for _, ev, _ in skylight.posts)
 
 

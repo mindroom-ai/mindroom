@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.desktop import macos_skylight
@@ -44,6 +45,14 @@ _MACOS_KEYCODES: dict[str, int] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _PidTarget:
+    pid: int
+    window_id: int | None
+    window_rect: DesktopRect | None
+    group: int
+
+
 def _quartz() -> Any:  # noqa: ANN401 - Optional PyObjC exposes a dynamic framework module.
     import Quartz  # noqa: PLC0415
 
@@ -73,6 +82,11 @@ def _mouse(kind: int, point: tuple[int, int], button: int, *, count: int = 1) ->
     api.CGEventPost(api.kCGHIDEventTap, event)
 
 
+def _run_check(check: Callable[[tuple[int, int]], None] | None, point: tuple[int, int]) -> None:
+    if check is not None:
+        check(point)
+
+
 def _set_int_field(api: Any, event: object, field: int, value: int) -> None:  # noqa: ANN401
     if not macos_skylight.set_integer_field(event, field, value):
         api.CGEventSetIntegerValueField(event, field, value)
@@ -96,60 +110,32 @@ def _stamp_window_fields(api: Any, event: object, pid: int, window_id: int | Non
             _set_int_field(api, event, field, window_id)
 
 
-def _post_pid_mouse(
-    pid: int,
-    event: object,
-    *,
-    screen_point: tuple[int, int],
-    window_rect: DesktopRect | None,
-    window_id: int | None,
-    click_group_id: int,
-    phase: int,
-    click_state: int,
-    button_number: int,
-    subtype: int,
-    preserve_raw_location: bool = False,
-) -> None:
-    api = _quartz()
-    for field, value in ((0, phase), (1, click_state), (3, button_number), (7, subtype), (58, click_group_id)):
-        _set_int_field(api, event, field, value)
-    _stamp_window_fields(api, event, pid, window_id)
-    loc_x, loc_y = _window_location(screen_point, window_rect, preserve_raw=preserve_raw_location)
-    macos_skylight.set_window_location(event, loc_x, loc_y)
-    api.CGEventSetFlags(event, 0)
-    if not macos_skylight.post_to_pid(pid, event, attach_auth_message=False):
+def _deliver_pid_event(api: Any, pid: int, event: object, *, attach_auth_message: bool) -> None:  # noqa: ANN401
+    if not macos_skylight.post_to_pid(pid, event, attach_auth_message=attach_auth_message):
         api.CGEventPostToPid(pid, event)
 
 
-def _send_pid_mouse(
-    pid: int,
+def _post_pid_mouse(
+    target: _PidTarget,
     kind: int,
     point: tuple[int, int],
     button: int,
-    window_id: int | None,
-    window_rect: DesktopRect | None,
     *,
-    group: int,
     phase: int = 3,
     click_state: int = 1,
     button_number: int = 0,
     subtype: int = 3,
     preserve_raw: bool = False,
 ) -> None:
-    event = _create_mouse_event(_quartz(), kind, point, button)
-    _post_pid_mouse(
-        pid,
-        event,
-        screen_point=point,
-        window_rect=window_rect,
-        window_id=window_id,
-        click_group_id=group,
-        phase=phase,
-        click_state=click_state,
-        button_number=button_number,
-        subtype=subtype,
-        preserve_raw_location=preserve_raw,
-    )
+    api = _quartz()
+    event = _create_mouse_event(api, kind, point, button)
+    for field, value in ((0, phase), (1, click_state), (3, button_number), (7, subtype), (58, target.group)):
+        _set_int_field(api, event, field, value)
+    _stamp_window_fields(api, event, target.pid, target.window_id)
+    loc_x, loc_y = _window_location(point, target.window_rect, preserve_raw=preserve_raw)
+    macos_skylight.set_window_location(event, loc_x, loc_y)
+    api.CGEventSetFlags(event, 0)
+    _deliver_pid_event(api, target.pid, event, attach_auth_message=False)
 
 
 def _activate_window(pid: int, window_id: int | None) -> None:
@@ -158,35 +144,15 @@ def _activate_window(pid: int, window_id: int | None) -> None:
         time.sleep(0.05)
 
 
-def _post_pid_move(pid: int, point: tuple[int, int], window_id: int | None, window_rect: DesktopRect | None) -> None:
+def _post_pid_move(target: _PidTarget, point: tuple[int, int]) -> None:
     api = _quartz()
-    _send_pid_mouse(
-        pid,
-        api.kCGEventMouseMoved,
-        point,
-        api.kCGMouseButtonLeft,
-        window_id,
-        window_rect,
-        group=next(_CLICK_GROUP_IDS),
-        phase=2,
-        click_state=0,
-    )
+    _post_pid_mouse(target, api.kCGEventMouseMoved, point, api.kCGMouseButtonLeft, phase=2, click_state=0)
 
 
-def _post_left_primer(pid: int, window_id: int | None, window_rect: DesktopRect | None) -> None:
-    api, group = _quartz(), next(_CLICK_GROUP_IDS)
+def _post_left_primer(target: _PidTarget) -> None:
+    api = _quartz()
     for kind, phase, delay in ((api.kCGEventLeftMouseDown, 1, 0.001), (api.kCGEventLeftMouseUp, 2, 0.1)):
-        _send_pid_mouse(
-            pid,
-            kind,
-            (-1, -1),
-            api.kCGMouseButtonLeft,
-            window_id,
-            window_rect,
-            group=group,
-            phase=phase,
-            preserve_raw=True,
-        )
+        _post_pid_mouse(target, kind, (-1, -1), api.kCGMouseButtonLeft, phase=phase, preserve_raw=True)
         time.sleep(delay)
 
 
@@ -207,76 +173,48 @@ def _post_pid_key(pid: int, keycode: int, *, flags: int = 0, unicode_chunk: str 
     for index, event in enumerate((key_down, key_up)):
         if index:
             time.sleep(0.008)
-        if not macos_skylight.post_to_pid(pid, event, attach_auth_message=True):
-            api.CGEventPostToPid(pid, event)
+        _deliver_pid_event(api, pid, event, attach_auth_message=True)
 
 
-def _split_background_text_segments(text: str) -> list[tuple[str, str | int]]:
-    segments: list[tuple[str, str | int]] = []
+def _chunk_background_utf16(text: str) -> list[str]:
+    chunks: list[str] = []
     chunk: list[str] = []
     utf16_units = 0
-
-    def flush() -> None:
-        nonlocal utf16_units
-        if chunk:
-            segments.append(("text", "".join(chunk)))
+    for ch in text:
+        units = 2 if ord(ch) > 0xFFFF else 1
+        if chunk and utf16_units + units > _MAX_BACKGROUND_UTF16_UNITS:
+            chunks.append("".join(chunk))
             chunk.clear()
             utf16_units = 0
-
-    index, length = 0, len(text)
-    while index < length:
-        ch = text[index]
-        if ch in {"\r", "\n"}:
-            flush()
-            if ch == "\r" and index + 1 < length and text[index + 1] == "\n":
-                index += 1
-            segments.append(("keycode", _MACOS_KEYCODES["return"]))
-        elif ch == "\t":
-            flush()
-            segments.append(("keycode", _MACOS_KEYCODES["tab"]))
-        else:
-            units = 2 if ord(ch) > 0xFFFF else 1
-            if utf16_units + units > _MAX_BACKGROUND_UTF16_UNITS:
-                flush()
-            chunk.append(ch)
-            utf16_units += units
-        index += 1
-    flush()
-    return segments
+        chunk.append(ch)
+        utf16_units += units
+    if chunk:
+        chunks.append("".join(chunk))
+    return chunks
 
 
-def window_owner_at(point: tuple[int, int]) -> int | None:
-    """Return the process owning the frontmost visible window at one global logical point."""
+def move(x: int, y: int, *, check: Callable[[tuple[int, int]], None] | None = None) -> None:
+    """Move to a global logical point without primary-screen clamping."""
     api = _quartz()
-    windows = api.CGWindowListCopyWindowInfo(api.kCGWindowListOptionOnScreenOnly, api.kCGNullWindowID) or ()
-    # Quartz lists on-screen windows front to back; negative layers are the desktop and its icons.
-    for window in windows:
-        bounds = window.get(api.kCGWindowBounds)
-        if window.get(api.kCGWindowLayer, 0) < 0 or window.get(api.kCGWindowAlpha, 1) <= 0 or bounds is None:
-            continue
-        if (
-            bounds["X"] <= point[0] < bounds["X"] + bounds["Width"]
-            and bounds["Y"] <= point[1] < bounds["Y"] + bounds["Height"]
-        ):
-            return int(window[api.kCGWindowOwnerPID])
-    return None
-
-
-def move(x: int, y: int, *, check: Callable[[tuple[int, int]], None]) -> None:
-    """Move to a verified global logical point without primary-screen clamping."""
-    api = _quartz()
-    check((x, y))
+    _run_check(check, (x, y))
     _mouse(api.kCGEventMouseMoved, (x, y), api.kCGMouseButtonLeft)
 
 
-def click(x: int, y: int, *, button: str, count: int, check: Callable[[tuple[int, int]], None]) -> None:
-    """Post matching down/up pairs and explicit double-click event counts, checking the point before each."""
+def click(
+    x: int,
+    y: int,
+    *,
+    button: str,
+    count: int,
+    check: Callable[[tuple[int, int]], None] | None = None,
+) -> None:
+    """Post matching down/up pairs and explicit double-click event counts on the global HID tap."""
     down, up, mouse_button, _ = _button_spec(_quartz(), button)
     for click_count in range(1, count + 1):
-        check((x, y))
+        _run_check(check, (x, y))
         try:
             _mouse(down, (x, y), mouse_button, count=click_count)
-            check((x, y))
+            _run_check(check, (x, y))
         finally:
             _mouse(up, (x, y), mouse_button, count=click_count)
         if click_count < count:
@@ -288,16 +226,16 @@ def drag(
     end: tuple[int, int],
     *,
     duration: float,
-    check: Callable[[tuple[int, int]], None],
+    check: Callable[[tuple[int, int]], None] | None = None,
     before_press: Callable[[], object] | None = None,
 ) -> None:
-    """Keep the left button paired through bounded motion and interruption, checking each point before it posts."""
+    """Keep the left button paired through bounded global-HID motion and interruption."""
     api = _quartz()
     move(*start, check=check)
     if before_press is not None:
         before_press()
     point = start
-    check(start)
+    _run_check(check, start)
     try:
         _mouse(api.kCGEventLeftMouseDown, start, api.kCGMouseButtonLeft)
         for step in range(1, 21):
@@ -305,20 +243,27 @@ def drag(
                 round(start[0] + (end[0] - start[0]) * step / 20),
                 round(start[1] + (end[1] - start[1]) * step / 20),
             )
-            check(target)
+            _run_check(check, target)
             point = target
             _mouse(api.kCGEventLeftMouseDragged, point, api.kCGMouseButtonLeft)
             time.sleep(duration / 20)
-        check(point)
+        _run_check(check, point)
     finally:
         _mouse(api.kCGEventLeftMouseUp, point, api.kCGMouseButtonLeft)
 
 
-def scroll(x: int, y: int, *, clicks: int, horizontal: bool, check: Callable[[tuple[int, int]], None]) -> None:
-    """Post a line-based wheel event at an explicitly verified app point."""
+def scroll(
+    x: int,
+    y: int,
+    *,
+    clicks: int,
+    horizontal: bool,
+    check: Callable[[tuple[int, int]], None] | None = None,
+) -> None:
+    """Post a line-based wheel event on the global HID tap."""
     api = _quartz()
     move(x, y, check=check)
-    check((x, y))
+    _run_check(check, (x, y))
     event = api.CGEventCreateScrollWheelEvent(
         None,
         api.kCGScrollEventUnitLine,
@@ -343,7 +288,7 @@ def move_background(
 ) -> None:
     """Deliver a background hover event directly to one app without moving the physical cursor."""
     check((x, y))
-    _post_pid_move(pid, (x, y), window_id, window_rect)
+    _post_pid_move(_PidTarget(pid, window_id, window_rect, next(_CLICK_GROUP_IDS)), (x, y))
 
 
 def click_background(
@@ -359,25 +304,22 @@ def click_background(
 ) -> None:
     """Deliver background click/double-click events to one app without raising it or moving the cursor."""
     down_kind, up_kind, mouse_button, button_number = _button_spec(_quartz(), button)
+    target = _PidTarget(pid, window_id, window_rect, next(_CLICK_GROUP_IDS))
     check((x, y))
     _activate_window(pid, window_id)
-    _post_pid_move(pid, (x, y), window_id, window_rect)
+    _post_pid_move(target, (x, y))
     time.sleep(0.015)
     if button == "left":
-        _post_left_primer(pid, window_id, window_rect)
-    group = next(_CLICK_GROUP_IDS)
+        _post_left_primer(target)
     for click_count in range(1, count + 1):
         check((x, y))
         pressed = False
         try:
-            _send_pid_mouse(
-                pid,
+            _post_pid_mouse(
+                target,
                 down_kind,
                 (x, y),
                 mouse_button,
-                window_id,
-                window_rect,
-                group=group,
                 click_state=click_count,
                 button_number=button_number,
             )
@@ -385,14 +327,11 @@ def click_background(
             time.sleep(0.001 if button == "left" else 0.025)
         finally:
             if pressed:
-                _send_pid_mouse(
-                    pid,
+                _post_pid_mouse(
+                    target,
                     up_kind,
                     (x, y),
                     mouse_button,
-                    window_id,
-                    window_rect,
-                    group=group,
                     click_state=click_count,
                     button_number=button_number,
                 )
@@ -413,26 +352,18 @@ def drag_background(
 ) -> None:
     """Deliver a background left-button drag directly to one app and always release on failure."""
     api = _quartz()
+    target = _PidTarget(pid, window_id, window_rect, next(_CLICK_GROUP_IDS))
     check(start)
     _activate_window(pid, window_id)
-    _post_pid_move(pid, start, window_id, window_rect)
+    _post_pid_move(target, start)
     time.sleep(0.015)
     if before_press is not None:
         before_press()
     check(start)
-    _post_left_primer(pid, window_id, window_rect)
-    group, point, pressed = next(_CLICK_GROUP_IDS), start, False
+    _post_left_primer(target)
+    point, pressed = start, False
     try:
-        _send_pid_mouse(
-            pid,
-            api.kCGEventLeftMouseDown,
-            start,
-            api.kCGMouseButtonLeft,
-            window_id,
-            window_rect,
-            group=group,
-            subtype=0,
-        )
+        _post_pid_mouse(target, api.kCGEventLeftMouseDown, start, api.kCGMouseButtonLeft, subtype=0)
         pressed = True
         for step in range(1, 21):
             next_point = (
@@ -441,30 +372,12 @@ def drag_background(
             )
             check(next_point)
             point = next_point
-            _send_pid_mouse(
-                pid,
-                api.kCGEventLeftMouseDragged,
-                point,
-                api.kCGMouseButtonLeft,
-                window_id,
-                window_rect,
-                group=group,
-                subtype=0,
-            )
+            _post_pid_mouse(target, api.kCGEventLeftMouseDragged, point, api.kCGMouseButtonLeft, subtype=0)
             time.sleep(duration / 20)
         check(point)
     finally:
         if pressed:
-            _send_pid_mouse(
-                pid,
-                api.kCGEventLeftMouseUp,
-                point,
-                api.kCGMouseButtonLeft,
-                window_id,
-                window_rect,
-                group=group,
-                subtype=0,
-            )
+            _post_pid_mouse(target, api.kCGEventLeftMouseUp, point, api.kCGMouseButtonLeft, subtype=0)
 
 
 def scroll_background(
@@ -481,7 +394,7 @@ def scroll_background(
     """Deliver a line-based wheel event directly to one app without moving the physical cursor."""
     api = _quartz()
     check((x, y))
-    _post_pid_move(pid, (x, y), window_id, window_rect)
+    _post_pid_move(_PidTarget(pid, window_id, window_rect, next(_CLICK_GROUP_IDS)), (x, y))
     time.sleep(0.015)
     check((x, y))
     event = api.CGEventCreateScrollWheelEvent(
@@ -498,8 +411,7 @@ def scroll_background(
     macos_skylight.set_window_location(event, *_window_location((x, y), window_rect))
     _stamp_window_fields(api, event, pid, window_id)
     api.CGEventSetFlags(event, 0)
-    if not macos_skylight.post_to_pid(pid, event, attach_auth_message=False):
-        api.CGEventPostToPid(pid, event)
+    _deliver_pid_event(api, pid, event, attach_auth_message=False)
 
 
 def type_text_background(
@@ -509,17 +421,14 @@ def type_text_background(
     *,
     before_chunk: Callable[[], None],
 ) -> None:
-    """Post bounded UTF-16 Unicode chunks and real Return/Tab keys directly to one background PID."""
+    """Post bounded UTF-16 Unicode chunks directly to one background PID on keycode 0."""
     activated = False
-    for kind, payload in _split_background_text_segments(text):
+    for chunk in _chunk_background_utf16(text):
         before_chunk()
         if not activated:
             _activate_window(pid, window_id)
             activated = True
-        if kind == "keycode":
-            _post_pid_key(pid, int(payload))
-        else:
-            _post_pid_key(pid, 0, unicode_chunk=str(payload))
+        _post_pid_key(pid, 0, unicode_chunk=chunk)
 
 
 def keypress_background(pid: int, window_id: int | None, keys: Sequence[str]) -> None:
@@ -554,5 +463,4 @@ __all__ = [
     "scroll",
     "scroll_background",
     "type_text_background",
-    "window_owner_at",
 ]

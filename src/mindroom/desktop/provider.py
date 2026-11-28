@@ -547,7 +547,7 @@ class PyAutoGuiDesktopProvider:
                     check=self._background_pointer_check(target.process_id, target.state.window, target.window_id),
                 )
             else:
-                macos_input.move(*point, check=self._pointer_check(None))
+                macos_input.move(*point)
         else:
             self._pyautogui.moveTo(*point)
 
@@ -623,7 +623,6 @@ class PyAutoGuiDesktopProvider:
                     start,
                     end,
                     duration=duration_ms / 1000,
-                    check=self._pointer_check(None),
                     before_press=before_press,
                 )
             return
@@ -656,24 +655,6 @@ class PyAutoGuiDesktopProvider:
         point = _normalized_point(target.state.window, x=x, y=y)
         self._mapped_display(target.state.window)
         return point, target
-
-    def _pointer_check(self, process_id: int | None) -> Callable[[tuple[int, int]], None]:
-        """Return a check for right before each global HID pointer event: the window at the point."""
-        posted = False
-
-        # Global HID events go to whichever window is on top at the point, such as a notification or floating panel.
-        def check(point: tuple[int, int]) -> None:
-            nonlocal posted
-            if process_id is not None and macos_input.window_owner_at(point) != process_id:
-                if not posted:
-                    msg = "Another window covers the allowed app at the pointer; nothing was sent."
-                    raise AccessibilityError(msg)
-                msg = "Another window covers the allowed app at the pointer; input stopped and its outcome may be partial."
-                raise AccessibilityActionOutcomeUnknownError(msg)
-            # Every passing check is followed by an event.
-            posted = True
-
-        return check
 
     def _background_pointer_check(
         self,
@@ -712,7 +693,7 @@ class PyAutoGuiDesktopProvider:
                     check=self._background_pointer_check(target.process_id, target.state.window, target.window_id),
                 )
             else:
-                macos_input.click(x, y, button=button, count=count, check=self._pointer_check(None))
+                macos_input.click(x, y, button=button, count=count)
         elif count == 1:
             self._pyautogui.click(x=x, y=y, button=button)
         else:
@@ -726,16 +707,11 @@ class PyAutoGuiDesktopProvider:
         y: int,
         *,
         process_id: int | None,
+        window_rect: DesktopRect,
         window_id: int | None = None,
-        window_rect: DesktopRect | None = None,
     ) -> None:
         if sys.platform == "darwin":
             if process_id is not None:
-                check = (
-                    self._background_pointer_check(process_id, window_rect, window_id)
-                    if window_rect is not None
-                    else lambda _point: None
-                )
                 macos_input.scroll_background(
                     process_id,
                     x,
@@ -744,16 +720,10 @@ class PyAutoGuiDesktopProvider:
                     horizontal=direction in {"left", "right"},
                     window_id=window_id,
                     window_rect=window_rect,
-                    check=check,
+                    check=self._background_pointer_check(process_id, window_rect, window_id),
                 )
             else:
-                macos_input.scroll(
-                    x,
-                    y,
-                    clicks=clicks,
-                    horizontal=direction in {"left", "right"},
-                    check=self._pointer_check(None),
-                )
+                macos_input.scroll(x, y, clicks=clicks, horizontal=direction in {"left", "right"})
             return
         operation = self._pyautogui.hscroll if direction in {"left", "right"} else self._pyautogui.scroll
         operation(clicks, x=x, y=y)
@@ -833,7 +803,7 @@ def _macos_window_id(
     for info in window_infos:
         if int(info.get(Quartz.kCGWindowOwnerPID, -1)) != process_id:  # ty: ignore[missing-attribute]
             continue
-        if int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[missing-attribute]
+        if expected_window_id is None and int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[missing-attribute]
             continue
         window_number = int(info.get(Quartz.kCGWindowNumber, -1))  # ty: ignore[missing-attribute]
         if expected_window_id is not None and window_number != expected_window_id:
