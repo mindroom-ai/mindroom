@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.automations import automation
+from mindroom.automations.builtins import resolve_automation_definition
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import HookOverrideConfig, PluginEntryConfig
@@ -215,7 +216,9 @@ def test_the_plugin_snapshot_carries_the_automations_plugins_register() -> None:
     definition = registry.automations.get("weekly_digest")
     assert definition is not None
     assert definition.check is digest
-    assert registry.automations.get("dreaming") is not None
+    assert registry.automations.get("dreaming") is None
+    assert registry.automations.is_provided("dreaming")
+    assert resolve_automation_definition("dreaming", registry.automations) is not None
     assert HookRegistry.empty().automations.get("weekly_digest") is None
 
 

@@ -1822,9 +1822,13 @@ depends_on = []
 visibility = ["mindroom.api.main", "mindroom.api.plugin_origins"]
 
 [[modules]]
-path = "mindroom.api.validation_errors"
+path = "mindroom.http_validation"
 depends_on = []
-visibility = ["mindroom.api.main", "mindroom.api.sandbox_runner_app", "mindroom.tool_system.plugins"]
+visibility = [
+    "mindroom.api.main",
+    "mindroom.api.sandbox_runner_app",
+    "mindroom.tool_system.plugins",
+]
 
 [[modules]]
 path = "mindroom.api.frontend"
@@ -2181,7 +2185,7 @@ depends_on = [
     "mindroom.integrations",
     "mindroom.api.usage",
     "mindroom.api.usage_export",
-    "mindroom.api.validation_errors",
+    "mindroom.http_validation",
     "mindroom.api.workers",
     "mindroom.api.workspace_files",
     "mindroom.call_transcripts",
@@ -2468,7 +2472,7 @@ depends_on = [
     "mindroom.worker_computer.runtime",
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_runner_scripts",
-    "mindroom.api.validation_errors",
+    "mindroom.http_validation",
     "mindroom.api.worker_preview",
     "mindroom.api.worker_services",
     "mindroom.api.worker_ssh",
@@ -4056,6 +4060,7 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.skills",
+    "mindroom.automations.builtins",
     "mindroom.automations.runner",
     "mindroom.skill_learning.runner",
     "mindroom.knowledge_graph.runtime",
@@ -7009,7 +7014,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.plugins"
 depends_on = [
-    "mindroom.api.validation_errors",
+    "mindroom.http_validation",
     "mindroom.automations.registry",
     "mindroom.egress_broker",
     "mindroom.hooks",
@@ -11018,12 +11023,17 @@ visibility = [
 
 [[modules]]
 path = "mindroom.automations.registry"
+depends_on = ["mindroom.config.automations"]
+
+[[modules]]
+path = "mindroom.automations.builtins"
 depends_on = [
     "mindroom.automations.dreaming",
-    "mindroom.automations.prompt_curation",
-    "mindroom.config.automations",
     "mindroom.automations.exploration",
+    "mindroom.automations.prompt_curation",
+    "mindroom.automations.registry",
 ]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.automations.prompt_curation"
@@ -11037,7 +11047,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.providers.registry",
 ]
-visibility = ["mindroom.automations.registry"]
+visibility = ["mindroom.automations.builtins"]
 
 [[modules]]
 path = "mindroom.automations.dreaming"
@@ -11049,7 +11059,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.config.resolution",
 ]
-visibility = ["mindroom.automations.registry"]
+visibility = ["mindroom.automations.builtins"]
 
 [[modules]]
 path = "mindroom.listening.markers"
@@ -11350,7 +11360,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.config.resolution",
 ]
-visibility = ["mindroom.automations.registry"]
+visibility = ["mindroom.automations.builtins"]
 [[modules]]
 path = "mindroom.history.mid_turn_compaction"
 depends_on = [

@@ -26,7 +26,6 @@ from mindroom import secret_requests as secret_request_store
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main, secret_requests
 from mindroom.api.client_sessions import client_session_store
-from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.egress_broker import EgressService
@@ -35,6 +34,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager, load_s
 from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 from mindroom.egress_broker.secrets import load_secret, save_secret
 from mindroom.egress_broker.user_services import load_user_services, save_user_service
+from mindroom.http_validation import validation_error_response
 from mindroom.message_target import MessageTarget
 from mindroom.secret_requests import (
     SECRET_REQUEST_CONTENT_KEY,
