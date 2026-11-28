@@ -449,7 +449,7 @@ class DirectChildResponseRunner(Protocol):
         ...
 
 
-class DelegationJobBuilder(Protocol):
+class _DelegationJobBuilder(Protocol):
     """Build the managed background job for a prepared subagent call."""
 
     def __call__(
@@ -480,4 +480,4 @@ class DelegationExecutor:
 
     run_child: ChildResponseRunner
     run_direct_child: DirectChildResponseRunner | None = None
-    build_job: DelegationJobBuilder | None = None
+    build_job: _DelegationJobBuilder | None = None
