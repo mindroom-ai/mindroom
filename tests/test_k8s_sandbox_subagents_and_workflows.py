@@ -20,6 +20,7 @@ from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
@@ -27,14 +28,21 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, write_startup_manifest
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import lifecycle as delegation_lifecycle
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.continuation import continued_subagent_job
-from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn, reserve_child_turn, start_child_turn
+from mindroom.delegation.lifecycle import (
+    child_execution_identity,
+    child_run_context,
+    finish_child_turn,
+    prepare_child_turn,
+    reserve_child_turn,
+    start_child_turn,
+)
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target, resolve_fresh_target
 from mindroom.delegation.workers import (
@@ -47,10 +55,17 @@ from mindroom.delegation.workers import (
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import system_text
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.execution import agent_tool_middleware, offered_definitions, wait_mode
 from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
+from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
@@ -64,6 +79,8 @@ from mindroom.tool_system.sandbox_proxy import (
     _ensure_route_worker,
     _placed_worker_spec,
     _worker_route_with_sandbox,
+    save_attachment_to_worker,
+    view_file_from_worker,
     worker_stand_ins,
 )
 from mindroom.tool_system.tool_access import ToolKey
@@ -82,7 +99,7 @@ from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.backends.local import _LocalWorkerBackend
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerSandboxConfig, WorkerSpec
-from mindroom.workers.named import NamedWorkerError, named_worker_call
+from mindroom.workers.named import NamedWorkerError, named_worker_call, resolve_locked_worker_options
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 from mindroom.workers.runtime import idle_worker_cleanup_owner
@@ -97,6 +114,7 @@ from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.test_kubernetes_worker_backend import _named_backend, _named_spec
 from tests.test_kubernetes_worker_backend import _spec as _k8s_spec
+from tests.tool_job_helpers import tool_job_journal
 from tests.workflow_helpers import NodeFailed, workflow_stack
 
 if TYPE_CHECKING:
@@ -859,7 +877,23 @@ def test_sandbox_create_agent_uses_allowlist_prompt_and_strips_ambient_context(t
     )
 
     assert {fn.registered_toolkit for fn in build.spec.functions.values()} == {"shell", "filesystem"}
-    assert build.tool_jobs is None
+    assert build.tool_jobs is not None
+    assert build.tool_jobs.inline_only is True
+    assert set(build.tool_jobs.tools) == set(build.spec.functions)
+    disabled_cfg = _config(paths, background_tool_jobs=BackgroundToolJobsConfig(enabled=False))
+    disabled_build = create_agent(
+        "leader",
+        disabled_cfg,
+        paths,
+        _identity("leader"),
+        knowledge=None,
+        model=TurnModel("default", "default", None, False),
+        provider=ScriptedModel(answer("ok")),
+        plugins=config_plugins(disabled_cfg, paths),
+        delegation_depth=1,
+        worker_sandbox=WorkerSandboxConfig(mount_dir="repo", mount_read_only=True),
+    )
+    assert disabled_build.tool_jobs is None
     assert build.surface.cli_shell is False
     assert build.surface.named_workers is False
     assert build.surface.deferred == ()
@@ -1625,3 +1659,398 @@ async def test_workflow_spawn_replay_to_starting_preserves_live_sandbox_pod_unti
         assert retired == [expected_key]
         assert stack.run_id not in stack.engine._runs
         await stack.close()
+
+
+# ---------------------------------------------------------------------------
+# 6. Round 3 regressions: sandbox tool_jobs live revocation, fail-closed toolkit
+#    dispatch without active placement, and locked-worker option helper
+# ---------------------------------------------------------------------------
+
+
+def _record_sandbox_proxy_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Patch sandbox_proxy dispatch to record worker requests without touching Kubernetes."""
+    worker_requests: list[tuple[str, str]] = []
+    backend = MagicMock()
+    backend.ensure_worker.side_effect = lambda spec, **_kwargs: _k8s_spec(spec.worker_key)
+
+    class _Lease:
+        def __enter__(self) -> MagicMock:
+            return backend
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    def _fake_execute(**kwargs: object) -> str:
+        req = kwargs["request"]
+        worker_requests.append((req.tool_name, req.function_name))
+        return f"ran:{req.function_name}"
+
+    monkeypatch.setattr(sandbox_proxy_module, "lease_worker_manager", lambda *_args, **_kwargs: _Lease())
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", _fake_execute)
+    return worker_requests
+
+
+async def _start_sandbox_child_job_coordinator(
+    tmp_path: Path,
+) -> tuple[
+    RuntimePaths,
+    list[Config],
+    ToolJobRuntimeCoordinator,
+    ToolExecutionIdentity,
+    DelegationChild,
+    ToolExecutionIdentity,
+]:
+    paths = _paths(tmp_path, _K8S_ENV)
+    cfg = _config(paths, background_tool_jobs=BackgroundToolJobsConfig(enabled=True))
+    config_box = [cfg]
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config_box[0],
+        bot_provider=lambda _name: None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=lambda: tool_job_journal(paths.storage_root),
+    )
+    await coordinator.initialize()
+    register_background_runtime(paths, coordinator.runtime)
+    caller_identity = replace(_identity("leader", session_id="parent-sess-1"), transport_agent_name="leader")
+    child = prepare_child_turn(
+        "leader",
+        "helper",
+        "Run sandboxed check",
+        owner=caller_identity,
+        config=cfg,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
+        dedicated_worker=True,
+        worker_sandbox=WorkerSandboxConfig(),
+    )
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run-1",
+        config=cfg,
+        runtime_paths=paths,
+        caller_execution_identity=caller_identity,
+    )
+    return paths, config_box, coordinator, caller_identity, child, child_execution_identity(child)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_subagent_tool_jobs_enforces_live_revocation_inline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standard sandboxed children retain JobActor authorization middleware while keeping all calls inline."""
+    paths, config_box, coordinator, caller_identity, child, child_identity = await _start_sandbox_child_job_coordinator(
+        tmp_path,
+    )
+    cfg = config_box[0]
+    sandbox = WorkerSandboxConfig()
+    child_context = replace(
+        _delegate_runtime_context(cfg, paths, execution_identity=child_identity),
+        agent_name="helper",
+        transport_agent_name="leader",
+        plugins=config_plugins(cfg, paths),
+    )
+    build_kwargs = {
+        "knowledge": None,
+        "model": TurnModel("default", "default", None, False),
+        "provider": ScriptedModel(answer("ok")),
+        "plugins": config_plugins(cfg, paths),
+        "worker_sandbox": sandbox,
+    }
+    child_build = create_agent("helper", cfg, paths, child_identity, delegation_depth=1, **build_kwargs)
+    depth0_build = create_agent("helper", cfg, paths, child_identity, delegation_depth=0, **build_kwargs)
+    assert child_build.tool_jobs is not None
+    assert child_build.tool_jobs.inline_only is True
+    assert depth0_build.tool_jobs is not None
+    assert depth0_build.tool_jobs.inline_only is True
+    assert {fn.registered_toolkit for fn in child_build.spec.functions.values()} == {"shell", "filesystem"}
+    worker_requests = _record_sandbox_proxy_requests(monkeypatch)
+    call_ctx = ToolCallContext(run_id="run-1", call_id="call-1", session_id=child_identity.session_id, user_id=None)
+
+    try:
+        async with (
+            execution_resources(response=True, jobs_enabled=True),
+            child_run_context(child, config=cfg, runtime_paths=paths),
+        ):
+            with tool_runtime_context(child_context):
+                shell_tool = child_build.tool_jobs.tools["run_shell_command"]
+                assert wait_mode(shell_tool, depth=0, context=child_context, inline_only=True) == "inline"
+                projected = offered_definitions(
+                    depth0_build.tool_jobs,
+                    PreparedTools(functions=depth0_build.spec.functions).specs(),
+                )
+                assert all("background_after" not in spec.parameters.get("properties", {}) for spec in projected)
+
+                # Authorized calls stay inline (both depth=1 and depth=0) with zero background jobs created.
+                for build, call_id in ((child_build, "call-1"), (depth0_build, "call-depth0")):
+                    ok = await run_tool_call(
+                        build.spec.functions["run_shell_command"],
+                        {"args": "echo ok"},
+                        replace(call_ctx, call_id=call_id),
+                        middleware=agent_tool_middleware(build),
+                    )
+                    assert ok.succeeded, ok.error
+                    assert ok.value == "ran:run_shell_command"
+                assert await coordinator.runtime.list_jobs(owner=caller_identity, depth=0) == []
+
+                bad_wait = await run_tool_call(
+                    depth0_build.spec.functions["run_shell_command"],
+                    {"args": "echo no", "background_after": 1},
+                    call_ctx,
+                    middleware=agent_tool_middleware(depth0_build),
+                )
+                assert not bad_wait.succeeded
+                assert isinstance(bad_wait.error, ValueError)
+                assert len(worker_requests) == 2
+
+                # Revoke shell from helper while leaving leader -> helper delegation authorized.
+                revoked_cfg = cfg.model_copy(deep=True)
+                revoked_cfg.agents["helper"].tools = ["filesystem"]
+                revoked_cfg.agents["helper"].worker_tools = ["filesystem"]
+                config_box[0] = revoked_cfg
+
+                refused = await run_tool_call(
+                    child_build.spec.functions["run_shell_command"],
+                    {"args": "echo revoked"},
+                    replace(call_ctx, call_id="call-2"),
+                    middleware=agent_tool_middleware(child_build),
+                )
+                assert not refused.succeeded
+                assert isinstance(refused.error, JobAccessError)
+                assert "no longer authorized" in str(refused.error)
+                assert len(worker_requests) == 2
+
+                # Still-authorized filesystem tool continues to execute inline.
+                still_ok = await run_tool_call(
+                    child_build.spec.functions["read_file"],
+                    {"path": "notes.txt"},
+                    replace(call_ctx, call_id="call-3"),
+                    middleware=agent_tool_middleware(child_build),
+                )
+                assert still_ok.succeeded, still_ok.error
+                assert still_ok.value == "ran:read_file"
+                assert len(worker_requests) == 3
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_built_toolkit_fails_closed_without_active_sandbox_placement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct invocation of sandbox-built tools fails closed without matching active sandbox placement."""
+    paths = _paths(tmp_path, _K8S_ENV)
+    cfg = _config(paths)
+    ws = agent_workspace_root_path(paths.storage_root, "leader")
+    (ws / "repo").mkdir(parents=True, exist_ok=True)
+    expected_sandbox = WorkerSandboxConfig(mount_dir="repo", mount_read_only=True)
+    identity = _identity("leader", session_id="sb-direct-sess")
+
+    build = create_agent(
+        "leader",
+        cfg,
+        paths,
+        identity,
+        knowledge=None,
+        model=TurnModel("default", "default", None, False),
+        provider=ScriptedModel(answer("ok")),
+        plugins=config_plugins(cfg, paths),
+        delegation_depth=1,
+        worker_sandbox=expected_sandbox,
+    )
+    run_shell = build.spec.functions["run_shell_command"]
+    read_file = build.spec.functions["read_file"]
+
+    lease_calls: list[object] = []
+    proxy_calls: list[object] = []
+
+    def _forbidden_lease(*args: object, **kwargs: object) -> object:
+        lease_calls.append((args, kwargs))
+        msg = "Normal worker must never be leased when sandbox placement is missing"
+        raise AssertionError(msg)
+
+    def _forbidden_execute(*args: object, **kwargs: object) -> object:
+        proxy_calls.append((args, kwargs))
+        msg = "Normal worker must never receive a request when sandbox placement is missing"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(sandbox_proxy_module, "lease_worker_manager", _forbidden_lease)
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", _forbidden_execute)
+
+    # 1. No dedicated_worker_placement bound at all -> both shell and filesystem fail closed.
+    with pytest.raises(RuntimeError, match="requires an active sandbox placement"):
+        await run_shell.entrypoint(args="echo should-not-run")
+    with pytest.raises(RuntimeError, match="requires an active sandbox placement"):
+        await read_file.entrypoint(path="secret.txt")
+
+    # 2. Dedicated placement without sandbox -> fails closed.
+    with (
+        dedicated_worker_placement(identity.session_id, DedicatedWorkerPlacement(subagent_id="sub-1", sandbox=None)),
+        pytest.raises(RuntimeError, match="requires an active sandbox placement"),
+    ):
+        await run_shell.entrypoint(args="echo non-sandbox")
+
+    # 3. Active sandbox placement that disagrees with the toolkit's expected WorkerSandboxConfig -> fails closed.
+    mismatched_sandbox = WorkerSandboxConfig(mount_dir="other", mount_read_only=False)
+    with (
+        dedicated_worker_placement(
+            identity.session_id,
+            DedicatedWorkerPlacement(subagent_id="sub-1", sandbox=mismatched_sandbox),
+        ),
+        pytest.raises(RuntimeError, match="does not match the toolkit's expected sandbox"),
+    ):
+        await read_file.entrypoint(path="secret.txt")
+
+    # 4. save_attachment_to_worker / view_file_from_worker also fail closed when sandbox_required=True.
+    target = ResolvedWorkerTarget(
+        worker_scope="user_agent",
+        routing_agent_name="leader",
+        execution_identity=identity,
+        tenant_id="default",
+        account_id=identity.requester_id,
+        worker_key=_NORMAL_KEY,
+        private_agent_names=frozenset(),
+    )
+    with pytest.raises(RuntimeError, match="requires an active sandbox placement"):
+        save_attachment_to_worker(
+            runtime_paths=paths,
+            runtime_config=cfg,
+            worker_target=target,
+            workspace_root=ws,
+            attachment_id="att-1",
+            mindroom_output_path="out.bin",
+            payload_bytes=b"abc",
+            sandbox_required=True,
+            expected_sandbox=expected_sandbox,
+        )
+    with pytest.raises(RuntimeError, match="requires an active sandbox placement"):
+        view_file_from_worker(
+            runtime_paths=paths,
+            runtime_config=cfg,
+            worker_target=target,
+            workspace_root=ws,
+            path="img.png",
+            sandbox_required=True,
+            expected_sandbox=expected_sandbox,
+        )
+
+    # 5. Primary-placement toolkit behind sandbox_required=True fails closed without executing locally on primary.
+    primary_calls: list[str] = []
+
+    class _PrimaryToolkit(SupportsPrimaryCallPlacement):
+        def runs_on_primary(self, function_name: str, arguments: dict[str, object]) -> bool:
+            del function_name, arguments
+            return True
+
+    def _local_fn() -> str:
+        primary_calls.append("ran-on-primary")
+        return "leaked"
+
+    primary_toolkit = _PrimaryToolkit()
+    stand_ins = worker_stand_ins(
+        "shell",
+        primary_toolkit,
+        runtime_paths=paths,
+        credentials_manager=None,
+        worker_target=target,
+        runtime_config=cfg,
+        tools=builtin_tool_registry(),
+        sandbox_required=True,
+        expected_sandbox=expected_sandbox,
+    )
+    wrapped = stand_ins("local_fn", _local_fn)
+    with pytest.raises(RuntimeError, match="cannot execute tool calls on the primary"):
+        await wrapped()
+    assert primary_calls == []
+
+    # 6. get_tool_by_name refuses to build an unrouted sandbox toolkit on the primary.
+    with pytest.raises(RuntimeError, match="must be routed to a worker"):
+        get_tool_by_name(
+            "shell",
+            paths,
+            tools=builtin_tool_registry(),
+            runs_in_worker=False,
+            sandbox=True,
+            worker_target=target,
+            runtime_config=cfg,
+        )
+
+    assert lease_calls == []
+    assert proxy_calls == []
+
+
+def test_resolve_locked_worker_options_policy() -> None:
+    """Locked worker option inheritance and conflict refusal share one pure policy across replies and workflows."""
+    sb_repo = WorkerSandboxConfig(mount_dir="repo", mount_read_only=True)
+    sb_scratch = WorkerSandboxConfig()
+
+    assert resolve_locked_worker_options(
+        None,
+        worker_name="box",
+        resource_profile="small",
+        sandbox=sb_repo,
+        sandbox_specified=True,
+    ) == ("small", sb_repo)
+
+    # Omitted options inherit locked values.
+    assert resolve_locked_worker_options(
+        ("small", sb_repo),
+        worker_name="box",
+        resource_profile=None,
+        sandbox=None,
+        sandbox_specified=False,
+        scope="reply",
+    ) == ("small", sb_repo)
+    assert resolve_locked_worker_options(
+        ("small", sb_repo),
+        worker_name="box",
+        resource_profile="small",
+        sandbox=sb_repo,
+        sandbox_specified=True,
+        scope="run",
+    ) == ("small", sb_repo)
+
+    # Conflicting profile / sandbox raise NamedWorkerError with scope-appropriate wording.
+    with pytest.raises(NamedWorkerError, match="was started with resource_profile small in this reply"):
+        resolve_locked_worker_options(
+            ("small", sb_repo),
+            worker_name="box",
+            resource_profile="large",
+            sandbox=None,
+            sandbox_specified=False,
+            scope="reply",
+        )
+    with pytest.raises(NamedWorkerError, match="was locked with resource_profile small in this run"):
+        resolve_locked_worker_options(
+            ("small", sb_repo),
+            worker_name="box",
+            resource_profile="large",
+            sandbox=None,
+            sandbox_specified=False,
+            scope="run",
+        )
+    with pytest.raises(NamedWorkerError, match=r"was started in sandbox mode .* in this reply"):
+        resolve_locked_worker_options(
+            ("small", sb_repo),
+            worker_name="box",
+            resource_profile=None,
+            sandbox=sb_scratch,
+            sandbox_specified=True,
+            scope="reply",
+        )
+    with pytest.raises(NamedWorkerError, match="was locked without sandbox mode in this run"):
+        resolve_locked_worker_options(
+            (None, None),
+            worker_name="box",
+            resource_profile=None,
+            sandbox=sb_scratch,
+            sandbox_specified=True,
+            scope="run",
+        )

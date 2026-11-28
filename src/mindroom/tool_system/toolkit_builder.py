@@ -34,6 +34,7 @@ _DIRECT_OUTPUT_TOOLKITS = frozenset({"skill_manage", "dynamic_tools"})
 
 class _SandboxToolKwargs(TypedDict, total=False):
     sandbox: bool
+    worker_sandbox: WorkerSandboxConfig
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
@@ -170,7 +171,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
                 tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
                 workspace_in_worker=workspace_in_worker,
                 worker_target=agent_runtime.execution.worker_target,
-                **(_SandboxToolKwargs(sandbox=True) if sandboxed else _SandboxToolKwargs()),
+                **(
+                    _SandboxToolKwargs(sandbox=True, worker_sandbox=worker_sandbox)
+                    if worker_sandbox is not None
+                    else _SandboxToolKwargs()
+                ),
             )
 
     if tool_name not in _DIRECT_OUTPUT_TOOLKITS:

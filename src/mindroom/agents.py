@@ -1985,6 +1985,18 @@ def _create_sandbox_agent(
         model_id=provider.identity.id,
         tool_count=sum(entry.toolkit is not None for entry in tool_assembly.entries),
     )
+    # Sandboxed children omit JobTools, so their calls stay inline while retaining per-call authorization checks.
+    tool_jobs = (
+        JobActor(
+            name=agent_name,
+            team=False,
+            depth=delegation_depth,
+            tools=assembled_job_tools(tool_assembly.job_sources(), authority_snapshot(config, agent_name)),
+            inline_only=True,
+        )
+        if background_tool_jobs_enabled(config, runtime_paths)
+        else None
+    )
     return AgentBuild(
         spec=spec,
         prompt=prompt,
@@ -1998,7 +2010,7 @@ def _create_sandbox_agent(
         ),
         history_settings=agent.history_settings,
         tool_policy=bind_live_tools(spec.functions, tool_assembly.tool_middleware),
-        tool_jobs=None,
+        tool_jobs=tool_jobs,
         surface=surface,
     )
 

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.authoring import Toolkit
+    from mindroom.workers.models import WorkerSandboxConfig
 
 logger = get_logger(__name__)
 
@@ -865,6 +866,7 @@ def get_tool_by_name(
     workspace_in_worker: bool | None = None,
     in_sandbox_request: bool = False,
     sandbox: bool = False,
+    worker_sandbox: WorkerSandboxConfig | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its name in ``tools``, the registry of the config the caller acts for.
@@ -882,11 +884,15 @@ def get_tool_by_name(
     tool_name = canonical_tool_name(tool_name)
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
+    sandbox_required = sandbox or worker_sandbox is not None
     routed = (
         _constructing_agent_runs_in_worker(tool_name, runtime_paths, tools, runtime_config, worker_target)
         if runs_in_worker is None
         else runs_in_worker
     )
+    if sandbox_required and not in_sandbox_request and not routed:
+        msg = f"Sandboxed tool '{tool_name}' must be routed to a worker."
+        raise RuntimeError(msg)
 
     def build() -> Toolkit:
         worker_scope = worker_target.worker_scope if worker_target is not None else None
@@ -942,7 +948,7 @@ def get_tool_by_name(
                 runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
             )
             init_kwargs["named_workers"] = (
-                not sandbox
+                not sandbox_required
                 and routed
                 and named_workers_refusal(routing_agent_name, runtime_config, runtime_paths) is None
             )
@@ -963,7 +969,7 @@ def get_tool_by_name(
                 workspace_in_worker=workspace_in_worker,
                 agent_state_root=agent_state_root,
                 in_sandbox_request=in_sandbox_request,
-                sandbox=sandbox,
+                sandbox=sandbox_required,
             ),
         )
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
@@ -996,6 +1002,8 @@ def get_tool_by_name(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 tools=tools,
+                sandbox_required=sandbox_required,
+                expected_sandbox=worker_sandbox,
             )
             if routed
             else None,

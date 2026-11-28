@@ -72,6 +72,7 @@ __all__ = [
     "named_worker_owner",
     "named_workers_refusal",
     "parse_named_worker_sandbox",
+    "resolve_locked_worker_options",
     "resolve_named_worker_scope",
     "sandbox_mount_relative_path",
     "serialize_sandbox_config",
@@ -138,6 +139,40 @@ def _describe_sandbox(sandbox: WorkerSandboxConfig | None) -> str:
     return f"in sandbox mode (mount_dir={sandbox.mount_dir!r}{mode})"
 
 
+def resolve_locked_worker_options(
+    locked: LockedWorkerSpec | None,
+    *,
+    worker_name: str,
+    resource_profile: ScriptResourceProfileName | None,
+    sandbox: WorkerSandboxConfig | None,
+    sandbox_specified: bool,
+    scope: str = "reply",
+) -> LockedWorkerSpec:
+    """Resolve effective ``(resource_profile, sandbox)`` against an optional locked worker spec.
+
+    When ``locked`` is None, returns ``(resource_profile, sandbox)``. Otherwise omitted options inherit the locked
+    values while conflicting options raise ``NamedWorkerError``.
+    """
+    if locked is None:
+        return resource_profile, sandbox
+    effective_profile, effective_sandbox = locked
+    verb = "started" if scope == "reply" else "locked"
+    if resource_profile not in (None, effective_profile):
+        size = f"resource_profile {effective_profile}" if effective_profile else "no resource_profile"
+        msg = (
+            f"Worker '{worker_name}' was {verb} with {size} in this {scope}; "
+            "omit resource_profile, or name another worker."
+        )
+        raise NamedWorkerError(msg)
+    if sandbox_specified and sandbox != effective_sandbox:
+        msg = (
+            f"Worker '{worker_name}' was {verb} {_describe_sandbox(effective_sandbox)} in this {scope}; "
+            "omit sandbox options to reuse it, or name another worker."
+        )
+        raise NamedWorkerError(msg)
+    return effective_profile, effective_sandbox
+
+
 @dataclass(slots=True)
 class _NamedWorker:
     """One worker a fleet started: its locked size and sandbox config, and the start its last call ran in."""
@@ -183,23 +218,14 @@ class _NamedWorkerFleet:
             raise NamedWorkerError(msg)
         worker = self.workers.get(worker_key)
         locked = (worker.resource_profile, worker.sandbox) if worker is not None else self.prelocked.get(call.name)
-        if locked is None:
-            effective_profile, effective_sandbox = call.resource_profile, call.sandbox
-        else:
-            effective_profile, effective_sandbox = locked
-            if call.resource_profile not in (None, effective_profile):
-                size = f"resource_profile {effective_profile}" if effective_profile else "no resource_profile"
-                msg = (
-                    f"Worker '{call.name}' was started with {size} in this reply; "
-                    "omit resource_profile, or name another worker."
-                )
-                raise NamedWorkerError(msg)
-            if call.sandbox_specified and call.sandbox != effective_sandbox:
-                msg = (
-                    f"Worker '{call.name}' was started {_describe_sandbox(effective_sandbox)} in this reply; "
-                    "omit sandbox options to reuse it, or name another worker."
-                )
-                raise NamedWorkerError(msg)
+        effective_profile, effective_sandbox = resolve_locked_worker_options(
+            locked,
+            worker_name=call.name,
+            resource_profile=call.resource_profile,
+            sandbox=call.sandbox,
+            sandbox_specified=call.sandbox_specified,
+            scope="reply",
+        )
         if effective_sandbox is not None and effective_sandbox.mount_dir is not None:
             runtime_class_name = configured_runtime_class_name(call.runtime_paths)
             if runtime_class_name is not None:

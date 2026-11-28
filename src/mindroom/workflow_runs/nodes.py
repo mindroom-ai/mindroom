@@ -30,6 +30,7 @@ from mindroom.workers.named import (
     deserialize_sandbox_config,
     named_worker_owner,
     parse_named_worker_sandbox,
+    resolve_locked_worker_options,
     resolve_named_worker_scope,
     serialize_sandbox_config,
     validate_effective_sandbox,
@@ -100,6 +101,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.workers.models import ScriptResourceProfileName, WorkerSandboxConfig
     from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.engine import WorkflowEngine
     from mindroom.workflow_runs.models import NodeRequest
@@ -397,30 +399,28 @@ def _verify_locked_worker(
     *,
     worker_name: str,
     owner_scope: str,
-    profile: object,
-    sandbox_config: object,
+    profile: ScriptResourceProfileName | None,
+    sandbox_config: WorkerSandboxConfig | None,
     sandbox_specified: bool,
 ) -> LockedWorkerSpec:
-    if existing.resource_profile is not None and existing.resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
-        msg = f"Worker '{worker_name}' has a corrupted persisted resource_profile."
-        raise NamedWorkerError(msg)
+    locked_profile: ScriptResourceProfileName | None = None
+    if existing.resource_profile is not None:
+        if existing.resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
+            msg = f"Worker '{worker_name}' has a corrupted persisted resource_profile."
+            raise NamedWorkerError(msg)
+        locked_profile = existing.resource_profile
     locked_sandbox = deserialize_sandbox_config(existing.sandbox_json)
     if existing.owner_scope != owner_scope:
         msg = f"Worker '{worker_name}' belongs to a different owner scope in this run."
         raise NamedWorkerError(msg)
-    if profile not in (None, existing.resource_profile):
-        size = f"resource_profile {existing.resource_profile}" if existing.resource_profile else "no resource_profile"
-        msg = (
-            f"Worker '{worker_name}' was locked with {size} in this run; omit resource_profile, or name another worker."
-        )
-        raise NamedWorkerError(msg)
-    if sandbox_specified and sandbox_config != locked_sandbox:
-        msg = (
-            f"Worker '{worker_name}' was locked with different sandbox settings in this run; "
-            "omit sandbox options to reuse it, or name another worker."
-        )
-        raise NamedWorkerError(msg)
-    return existing.resource_profile, locked_sandbox
+    return resolve_locked_worker_options(
+        (locked_profile, locked_sandbox),
+        worker_name=worker_name,
+        resource_profile=profile,
+        sandbox=sandbox_config,
+        sandbox_specified=sandbox_specified,
+        scope="run",
+    )
 
 
 def _prepare_shell_worker(
