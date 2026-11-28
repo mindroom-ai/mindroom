@@ -11,12 +11,15 @@ import functools
 import os
 import re
 import threading
-from contextvars import copy_context
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mindroom.embeddings.factory import create_configured_embedder, embedder_client_signature
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
+from mindroom.knowledge_graph.async_support import (
+    UnusableExtractionError,  # noqa: F401 - re-export the extraction error
+    run_on_loop,
+)
 from mindroom.knowledge_graph.extraction import ENTITY_TYPES, EXCLUDED_ENTITY_TYPES, extraction_instructions
 from mindroom.knowledge_graph.names import entity_names
 from mindroom.knowledge_graph.usage import usage_target
@@ -25,7 +28,6 @@ from mindroom.tool_system.dependencies import ensure_tool_deps, optional_depende
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
-    from concurrent.futures import Future as ConcurrentFuture
     from datetime import datetime
 
     from graphiti_core import Graphiti
@@ -160,10 +162,6 @@ class GraphStore(Protocol):
         """Replace the summary of the scope's entity with id ``entity_id`` and return its name, or None when it has none."""
 
 
-class UnusableExtractionError(ValueError):
-    """The extraction model answered with output Graphiti cannot use; repeated ones drop the episode."""
-
-
 _SHOWN_SOURCES = 3
 _failure: str | None = None
 _runtime_store: GraphStore | None = None
@@ -256,23 +254,6 @@ async def _facts(driver: GraphDriver, edges: Sequence[EntityEdge]) -> list[Graph
         )
         for edge in edges
     ]
-
-
-async def run_on_loop[T](loop: asyncio.AbstractEventLoop, coroutine: Coroutine[Any, Any, T]) -> T:
-    """Await ``coroutine`` on ``loop`` with the caller's context variables; cancelling the caller cancels it."""
-    if loop is asyncio.get_running_loop():
-        return await coroutine
-    future = cast("ConcurrentFuture[T]", copy_context().run(asyncio.run_coroutine_threadsafe, coroutine, loop))
-    try:
-        return await asyncio.wrap_future(future)
-    except asyncio.CancelledError:
-        task = asyncio.current_task()
-        if task is not None and task.cancelling():
-            raise
-        # The work was cancelled on its own loop, for example by closing the store, not by this caller; a caller
-        # such as an agent's tool call must see an ordinary failure rather than its own turn being cancelled.
-        msg = "The work was cancelled on the other event loop"
-        raise RuntimeError(msg) from None
 
 
 class _GraphLoop:

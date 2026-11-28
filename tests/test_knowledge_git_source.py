@@ -40,12 +40,8 @@ from mindroom.knowledge.index_metadata import publication_path
 from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
-from mindroom.knowledge.refresh_runner import (
-    _refresh_knowledge_binding as refresh_knowledge_binding,
-)
-from mindroom.knowledge.refresh_runner import (
-    refresh_knowledge_binding_in_subprocess,
-)
+from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess
+from mindroom.knowledge.refresh_worker import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
     published_index_storage_path,

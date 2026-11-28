@@ -29,7 +29,7 @@ from mindroom.history.storage import (
     set_force_compaction,
 )
 from mindroom.llm.runs import RunStatus
-from mindroom.session_storage.agent_storage import create_state_storage, save_compaction_usage
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.codec import run_kind
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.legacy_scope_metadata import (
@@ -37,7 +37,7 @@ from mindroom.session_storage.legacy_scope_metadata import (
     LEGACY_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.session_storage.schema import quote_identifier, usage_table_sql
-from mindroom.session_storage.store import connect_conversation_database
+from mindroom.session_storage.store import connect_conversation_database, save_compaction_usage
 from mindroom.session_storage.summary_rows import Fold, latest_row
 from mindroom.session_storage.types import session_state_snapshot
 from tests.conftest import delete_runs, seed_session_state

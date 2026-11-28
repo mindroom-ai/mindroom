@@ -333,6 +333,7 @@ Matrix sync callback
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `history/conversation_text.py` | What stored turns said, for background model calls and compaction hooks: which turns and messages count and who said each |
 | `embeddings/` | The `Embedder` interface semantic indexes embed queries and documents through, its OpenAI-compatible, Ollama, Vertex AI, and local sentence-transformers implementations, embedder health, and vector compatibility signatures |
+| `embeddings/health_state.py` | The process-wide embedder health and the generation that stops stale requests from changing it |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
@@ -347,12 +348,14 @@ Matrix sync callback
 | `knowledge/legacy_index_state.py` | Startup conversion of knowledge state earlier releases kept outside each collection |
 | `knowledge/index_reader.py` | Published index handle: embeds a query and searches the current compatible publication on a worker thread |
 | `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
-| `knowledge/refresh_runner.py` | One knowledge refresh: the child's work under the source-root lock, and the runtime side that spawns it and records its outcome in the refresh status |
+| `knowledge/refresh_runner.py` | Starts a refresh subprocess and records its outcome in the refresh status |
+| `knowledge/refresh_worker.py` | Executes a refresh under the source-root lock and publishes file-only metadata after dashboard edits |
 | `knowledge/refresh_scheduler.py` | The process's one refresh scheduler: which bases are refreshing, one queued request each, the concurrency limit, and on-access cooldowns |
 | `knowledge/refresh_locks.py` | The source-root lock that serializes one source's refresh and mutation work, in-loop and across processes |
 | `knowledge_graph/scope.py` | Which graph an agent or private instance owns, named in code from its state root, embedder, and generation |
 | `knowledge_graph/store.py` | The runtime's one Graphiti client and its episode, fact, and entity operations; health and the store registry |
 | `knowledge_graph/clients.py` | Graphiti's LLM, embedder, and reranker clients backed by MindRoom's model and embedder construction |
+| `knowledge_graph/async_support.py` | Cross-loop calls and the shared error for unusable model extraction output |
 | `knowledge_graph/usage.py` | Which conversation an extraction call's tokens are charged to |
 | `knowledge_graph/extraction.py` | What Graphiti is told when it extracts an episode: the entity types and the extraction instructions, built-in, configured, and the names of the episode's known entities |
 | `knowledge_graph/embedded_server.py` | The embedded FalkorDB server MindRoom starts, stops, and recovers after a crash |
