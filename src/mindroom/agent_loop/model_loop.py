@@ -42,9 +42,7 @@ from mindroom.llm.errors import (
 from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
-    ModelIdentity,
     ModelRequest,
-    ModelSelected,
     ReasoningDelta,
     StreamTracker,
     TextDelta,
@@ -62,7 +60,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.agent_loop.tools import PreparedTools, ToolBatch
-    from mindroom.llm.provider import ModelProvider, StopReason, ToolSpec
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, StopReason, ToolSpec
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import MessageMetrics, RunMetrics
     from mindroom.tool_system.invocation import ToolMiddleware
@@ -154,9 +152,9 @@ class LoopHooks:
       they are appended, before the loop continues; a resumed batch that stops the run runs none. Its hooks return as
       ``after_tool_batch`` hooks do.
     - ``on_usage_updated``: called synchronously whenever the run's live usage, answering model, or recorded tool
-      calls change — on mid-request ``UsageReported`` and fallback ``ModelSelected`` events (with a non-mutating
-      projected state), after a completed turn is accepted, after a tool batch is recorded, and after a cut-off
-      request's usage is kept. Errors raised by this telemetry hook are logged and ignored so they never disrupt a run.
+      calls change — on mid-request ``UsageReported`` events (with a non-mutating projected state), after a completed
+      turn is accepted, after a tool batch is recorded, and after a cut-off request's usage is kept. Errors raised by
+      this telemetry hook are logged and ignored so they never disrupt a run.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
       request as sent, when any was (the skill review's capture).
     """
@@ -253,7 +251,6 @@ async def run_model_loop(
             messages,
             state.record,
             tracker,
-            active_model_name=state.run.model_name,
             on_usage=(
                 None
                 if hooks.on_usage_updated is None
@@ -342,9 +339,9 @@ def _notify_in_flight_usage(
     hooks: LoopHooks,
     state: LoopState,
     tracker: StreamTracker,
-    received: MessageMetrics | None,
+    received: MessageMetrics,
 ) -> None:
-    """Project one mid-request usage or model-switch update and forward it defensively."""
+    """Project one mid-request usage report and forward it defensively."""
     if hooks.on_usage_updated is None:
         return
     try:
@@ -353,14 +350,13 @@ def _notify_in_flight_usage(
         logger.warning("usage_progress_hook_failed", entity=_entity(state.record), exc_info=True)
 
 
-def _in_flight_state(state: LoopState, tracker: StreamTracker, received: MessageMetrics | None) -> LoopState:
-    """Return a non-mutating ``LoopState`` snapshot projecting one mid-request usage or model-switch update."""
+def _in_flight_state(state: LoopState, tracker: StreamTracker, received: MessageMetrics) -> LoopState:
+    """Return a non-mutating ``LoopState`` snapshot projecting one mid-request usage report."""
     assert state.record.metrics is not None
     projected_metrics = deepcopy(state.record.metrics)
     for prior_identity, prior_metrics in tracker.prior_usage:
         _count_request(projected_metrics, prior_metrics, prior_identity)
-    if received is not None:
-        _count_request(projected_metrics, received, tracker.identity)
+    _count_request(projected_metrics, received, tracker.identity)
     projected_record = replace(
         state.record,
         metrics=projected_metrics,
@@ -368,22 +364,18 @@ def _in_flight_state(state: LoopState, tracker: StreamTracker, received: Message
         model_provider=tracker.identity.provider,
         model_name=tracker.model_name if tracker.model_name is not None else state.record.model_name,
     )
-    if received is None:
-        # A fallback model was just selected and has not reported its own context usage yet.
-        projected_messages: list[Message] = []
-    else:
-        projected_messages = list(state.messages)
-        if not tracker.reported.sums_attempts:
-            projected_messages.append(
-                Message(
-                    role="assistant",
-                    metrics=received,
-                    meta=MessageMeta(
-                        model=ModelProvenance(tracker.identity.id, tracker.identity.provider),
-                        aggregate_usage=False,
-                    ),
+    projected_messages = list(state.messages)
+    if not tracker.reported.sums_attempts:
+        projected_messages.append(
+            Message(
+                role="assistant",
+                metrics=received,
+                meta=MessageMeta(
+                    model=ModelProvenance(tracker.identity.id, tracker.identity.provider),
+                    aggregate_usage=False,
                 ),
-            )
+            ),
+        )
     return replace(state, record=projected_record, messages=projected_messages)
 
 
@@ -623,28 +615,6 @@ async def _stamp_request_identity(model: ModelProvider, request: ModelRequest, t
         turn.message.meta = replace(meta, request_identity=request_identity, cache_routing=cache_routing)
 
 
-def _observe_model_selected(
-    event: ModelSelected,
-    active_identity: ModelIdentity,
-    active_model_name: str | None,
-) -> tuple[bool, ModelIdentity, str | None]:
-    """Return ``(switched, next_identity, next_model_name)`` after observing a ``ModelSelected`` event."""
-    switched = event.identity != active_identity or (
-        active_model_name is not None and event.model_name is not None and event.model_name != active_model_name
-    )
-    next_model_name = event.model_name if event.model_name is not None else active_model_name
-    return switched, event.identity, next_model_name
-
-
-def _emit_reported_usage(
-    tracker: StreamTracker,
-    on_usage: Callable[[StreamTracker, MessageMetrics | None], None] | None,
-) -> None:
-    """Forward the tracker's reported usage when an in-flight usage callback is registered."""
-    if on_usage is not None and (received := tracker.reported.received) is not None and received.reported:
-        on_usage(tracker, received)
-
-
 async def _stream_turn(
     model: ModelProvider,
     request: ModelRequest,
@@ -652,8 +622,7 @@ async def _stream_turn(
     record: AnyRunRecord,
     tracker: StreamTracker,
     *,
-    active_model_name: str | None = None,
-    on_usage: Callable[[StreamTracker, MessageMetrics | None], None] | None = None,
+    on_usage: Callable[[StreamTracker, MessageMetrics], None] | None = None,
     on_unaccepted: Callable[[], None] | None = None,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
@@ -665,12 +634,6 @@ async def _stream_turn(
     reported usage is kept under its billing identity and the run record updates its answering model whenever the active
     attempt emitted output or usage.
     """
-    active_identity = (
-        ModelIdentity(id=record.model, provider=record.model_provider)
-        if record.model and record.model_provider
-        else tracker.identity
-    )
-    current_model_name = record.model_name or active_model_name
     turn: TurnCompleted | None = None
     handed_off = False
     shown: list[str] = []
@@ -679,16 +642,9 @@ async def _stream_turn(
         async with closing_async_stream(stream):
             async for event in stream:
                 tracker.observe(event)
-                if isinstance(event, ModelSelected):
-                    switched, active_identity, current_model_name = _observe_model_selected(
-                        event,
-                        active_identity,
-                        current_model_name,
-                    )
-                    if switched and on_usage is not None:
-                        on_usage(tracker, None)
-                elif isinstance(event, UsageReported):
-                    _emit_reported_usage(tracker, on_usage)
+                if isinstance(event, UsageReported) and on_usage is not None:
+                    if (received := tracker.reported.received) is not None and received.reported:
+                        on_usage(tracker, received)
                 elif isinstance(event, TextDelta):
                     shown.append(event.text)
                     yield event
@@ -703,8 +659,8 @@ async def _stream_turn(
         handed_off = True
     finally:
         if not handed_off:
-            _keep_unaccepted(messages, record, turn, tracker, "".join(shown))
-            if on_unaccepted is not None:
+            recorded_usage = _keep_unaccepted(messages, record, turn, tracker, "".join(shown))
+            if recorded_usage and on_unaccepted is not None:
                 on_unaccepted()
 
 
@@ -714,8 +670,8 @@ def _keep_unaccepted(
     turn: TurnCompleted | None,
     tracker: StreamTracker,
     shown: str,
-) -> None:
-    """Keep a cut-off request under its answering identity and update the record when the active model answered."""
+) -> bool:
+    """Keep a cut-off request under its answering identity and return whether new usage or a turn was recorded."""
     metrics = record.metrics
     assert metrics is not None
     for prior_identity, prior_metrics in tracker.prior_usage:
@@ -725,9 +681,10 @@ def _keep_unaccepted(
         answered = answering_identity(turn.message, tracker.identity)
         _stamp_answering_model(record, answered, tracker.model_name)
         _keep_cut_off(messages, metrics, answered, turn.message.metrics, shown, sums_attempts=sums_attempts)
-        return
+        return True
     active_billed = tracker.reported.received
-    if tracker.answered or (active_billed is not None and active_billed.reported):
+    active_reported = active_billed is not None and active_billed.reported
+    if tracker.answered or active_reported:
         _stamp_answering_model(record, tracker.identity, tracker.model_name)
     _keep_cut_off(
         messages,
@@ -737,6 +694,7 @@ def _keep_unaccepted(
         shown,
         sums_attempts=tracker.reported.sums_attempts,
     )
+    return bool(tracker.prior_usage or active_reported)
 
 
 def _validate_completed_turn(turn: TurnCompleted | None, *, provider: str) -> TurnCompleted:

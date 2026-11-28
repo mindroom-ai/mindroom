@@ -426,11 +426,10 @@ def ai_run_metrics_fields(
         cost_payload["subagents_usd"] = format_cost_usd(subagents_usd)
     if cost_payload:
         fields["cost"] = cost_payload
-    use_prepared_fallback = include_duration or resolved_model_name == model_name
     context = _reply_context_tokens_from_messages(
         messages,
-        prepared_history if use_prepared_fallback else None,
-        prepared_context_tokens=prepared_context_tokens if use_prepared_fallback else None,
+        prepared_history,
+        prepared_context_tokens=prepared_context_tokens,
         provider=provider,
         configured_provider=configured_provider,
         model_id=model_id,

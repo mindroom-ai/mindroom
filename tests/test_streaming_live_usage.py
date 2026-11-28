@@ -36,9 +36,8 @@ from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.event_journal.approval_calls import approval_arguments_digest
 from mindroom.history.types import PreparedHistoryState
 from mindroom.live_frames.publisher import LivePublisher
-from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
-from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
@@ -61,7 +60,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.response_runner_helpers import _plain_request, _target
-from tests.scripted_agent_helpers import raising, registered_toolkit
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.streaming_helpers import FakeReplyRecords
 from tests.streaming_metadata_helpers import (
     ECHO_TOOL,
@@ -1215,25 +1214,33 @@ async def test_team_approval_resume_preserves_pre_pause_member_usage_on_live_and
 
 
 @pytest.mark.asyncio
-async def test_fallback_model_selected_updates_live_model_without_stale_primary_context(
+async def test_fallback_wrapped_endpoint_primary_keeps_measured_context_across_followup_requests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
 ) -> None:
-    """Mid-request fallback ModelSelected updates live model and keeps billed prior usage without stale primary context."""
-    fallback_gate = asyncio.Event()
+    """An endpoint-bearing primary wrapped in fallback_stream keeps measured context across follow-up requests."""
+    del echo_tool
+    followup_gate = asyncio.Event()
     turn = await setup_turn(
         tmp_path,
         monkeypatch,
+        tools=[ECHO_TOOL],
         priced=True,
         scripts={
             "default": [
-                [
-                    UsageReported(usage(400, 10), final=False),
-                    raising(ProviderUnavailable("primary busy", provider="OpenAI")),
-                ],
+                calls(tool_call("echo", "c1", text="hi"), metrics=usage(5_200, 100)),
+                gated_answer("Follow-up ", followup_gate, "complete.", metrics=usage(6_000, 150)),
             ],
-            "large": [gated_answer("Fallback answering ", fallback_gate, "complete.", metrics=usage(600, 30))],
+            "large": [answer("unused fallback")],
         },
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+    base_identity = turn.models["default"].identity
+    turn.models["default"].identity = ModelIdentity(
+        id=base_identity.id,
+        provider=base_identity.provider,
+        endpoint="https://api.openai.example/v1",
     )
     fallback_provider = turn.models["large"]
     wrapped_primary = WrappedProvider(
@@ -1246,39 +1253,86 @@ async def test_fallback_model_selected_updates_live_model_without_stale_primary_
         ),
     )
     install_model_providers(monkeypatch, {**turn.models, "default": wrapped_primary})
-    expected_fallback_model = {
-        **answered_model_payload(turn.bot.config, "large"),
-        "fallback_from": "default",
-    }
 
-    async with running_task(turn.runner.generate_response(_plain_request(_target())), fallback_gate) as task:
+    async with running_task(turn.runner.generate_response(_plain_request(_target())), followup_gate) as task:
         live_edits = await wait_for_writes(
             turn,
             lambda w: (
-                stream_status(w) == STREAM_STATUS_STREAMING
-                and "Fallback answering" in str(visible_content(w).get("body", ""))
+                stream_status(w) == STREAM_STATUS_STREAMING and "Follow-up" in str(visible_content(w).get("body", ""))
             ),
         )
         live_ai_run = assert_provisional_contract(ai_run(live_edits[-1]))
-        assert live_ai_run["model"] == expected_fallback_model
-        # Primary's billed prior_usage (400/10 @ 2/8 = 0.00088) is preserved; primary's 100k context window is omitted.
-        assert live_ai_run["usage"]["input_tokens"] == 400
-        assert live_ai_run["usage"]["output_tokens"] == 10
-        assert live_ai_run["cost"] == {"usd": "0.00088"}
-        assert "context" not in live_ai_run
+        assert live_ai_run["model"] == answered_model_payload(turn.bot.config, "default")
+        # Request #2's ModelSelected with endpoint never resets Request #1's measured 5,200 context to turn-start estimate.
+        assert live_ai_run["context"] == {"input_tokens": 5_200, "window_tokens": 100_000}
+        assert live_ai_run["usage"]["input_tokens"] == 5_200
+        assert live_ai_run["usage"]["output_tokens"] == 100
+        assert live_ai_run["tools"] == {"count": 1}
 
-        fallback_gate.set()
+        followup_gate.set()
         assert await asyncio.wait_for(task, timeout=10) == Owned()
 
     final_ai_run = ai_run(turn.homeserver.writes[-1])
     assert final_ai_run is not None
     assert final_ai_run["status"] == "completed"
-    assert final_ai_run["model"] == expected_fallback_model
-    # Primary (400/10 @ 0.00088) + fallback (600/30 @ 0.00375) = 1000/40, 0.00463.
-    assert final_ai_run["usage"]["input_tokens"] == 1_000
-    assert final_ai_run["usage"]["output_tokens"] == 40
-    assert final_ai_run["cost"] == {"usd": "0.00463"}
-    assert final_ai_run["context"] == {"input_tokens": 600, "window_tokens": 200_000}
+    assert final_ai_run["usage"]["input_tokens"] == 11_200
+    assert final_ai_run["usage"]["output_tokens"] == 250
+    assert final_ai_run["context"] == {"input_tokens": 6_000, "window_tokens": 100_000}
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_stop_without_usage_on_followup_request_preserves_prior_measured_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """Stopping a follow-up request that streamed text before reporting usage keeps Request #1's measured context."""
+    del echo_tool
+    gate = asyncio.Event()
+    turn = await setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=[ECHO_TOOL],
+        priced=True,
+        scripts={
+            "default": [
+                calls(tool_call("echo", "c1", text="hi"), metrics=usage(5_200, 100)),
+                [
+                    TextDelta("Partial answer "),
+                    Await(gate.wait),
+                    TextDelta("never"),
+                    TurnCompleted(
+                        message=Message(role="assistant", content="Partial answer never", metrics=usage(6_000, 120)),
+                        stop_reason="end",
+                    ),
+                ],
+            ],
+        },
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+
+    async with running_task(turn.runner.generate_response(_plain_request(_target())), gate) as task:
+        await wait_for_writes(
+            turn,
+            lambda w: (
+                stream_status(w) == STREAM_STATUS_STREAMING
+                and "Partial answer" in str(visible_content(w).get("body", ""))
+            ),
+        )
+        await stop_reply(turn, 15)
+        await asyncio.wait_for(task, timeout=10)
+
+    cancelled_write = turn.homeserver.writes[-1]
+    assert stream_status(cancelled_write) == STREAM_STATUS_CANCELLED
+    cancelled_ai_run = ai_run(cancelled_write)
+    assert cancelled_ai_run is not None
+    assert cancelled_ai_run["status"] == "cancelled"
+    assert "run_id" not in cancelled_ai_run
+    # Cut-off Request #2 billed no usage, so Request #1's measured 5,200 context is retained instead of turn-start estimate.
+    assert cancelled_ai_run["context"] == {"input_tokens": 5_200, "window_tokens": 100_000}
+    assert cancelled_ai_run["usage"]["input_tokens"] == 5_200
+    assert cancelled_ai_run["usage"]["output_tokens"] == 100
+    assert cancelled_ai_run["tools"] == {"count": 1}
 
 
 @pytest.mark.asyncio
