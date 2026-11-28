@@ -7,7 +7,7 @@ import base64
 import pytest
 
 from mindroom.config.egress_broker import EgressBrokerConfig, EgressService
-from mindroom.egress_broker.presets import EGRESS_PRESETS
+from mindroom.config.egress_presets import EGRESS_PRESETS
 from mindroom.egress_broker.rules import inject_credentials, match_rule
 
 _BROKERED = "mindroom-brokered"

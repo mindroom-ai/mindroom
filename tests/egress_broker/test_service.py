@@ -35,7 +35,6 @@ from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import (
     BROKER_CA_PEM_ENV,
     EGRESS_BROKER_ENV_BY_KEY,
-    RUNNER_CA_BUNDLE_ENV,
     apply_runner_ca_bundle,
     egress_broker_enabled,
 )
@@ -64,6 +63,7 @@ from mindroom.egress_broker.user_services import (
 )
 from mindroom.github_app_auth import GitHubAppTokenProvider
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.runtime_env_policy import RUNNER_CA_BUNDLE_ENV
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
