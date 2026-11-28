@@ -329,6 +329,28 @@ def _with_note(shown: Presentation, note: Segment) -> Presentation:
     return with_trailing_note(shown, note)
 
 
+def _approval_note_provisional(
+    matching_handle: SpanHandle | None,
+    *,
+    live_model: Mapping[str, str] | None,
+    fallback_model: Mapping[str, str] | None,
+    shown_ai_run: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """Resolve provisional ``ai_run`` metrics for an approval failure/stop note, falling back to ``Presentation.ai_run``."""
+    if matching_handle is not None and matching_handle.ai_run_progress.has_metrics():
+        return matching_handle.ai_run_progress.payload(fallback_model=fallback_model)
+    if shown_ai_run is not None:
+        if live_model is not None and shown_ai_run.get("model") != live_model:
+            return {
+                **{k: v for k, v in shown_ai_run.items() if k not in ("context", "tools")},
+                "model": dict(live_model),
+            }
+        return shown_ai_run
+    if matching_handle is not None:
+        return matching_handle.ai_run_progress.payload(fallback_model=fallback_model)
+    return None
+
+
 def _ensure_terminal_ai_run_metadata(
     extra_content: dict[str, Any],
     *,
@@ -1272,11 +1294,17 @@ class DeliveryGateway:
         """
         handle_model = write.handle.reply_model if write.handle is not None else None
         resolved_model = handle_model if handle_model is not None else model
-        resolved_provisional = (
-            write.handle.ai_run_progress.payload(fallback_model=resolved_model)
-            if write.handle is not None
-            else provisional
+        handle_provisional = (
+            write.handle.ai_run_progress.payload(fallback_model=resolved_model) if write.handle is not None else None
         )
+        if write.handle is not None and write.handle.ai_run_progress.has_metrics():
+            resolved_provisional = handle_provisional
+        elif provisional is not None:
+            resolved_provisional = provisional
+        elif write.shown.ai_run is not None:
+            resolved_provisional = write.shown.ai_run
+        else:
+            resolved_provisional = handle_provisional
         extra_content: dict[str, Any] = {
             constants.STREAM_STATUS_KEY: rendered.stream_status,
             **build_terminal_note_ai_run_metadata_content(
@@ -1454,8 +1482,11 @@ class DeliveryGateway:
                 if live_model is not None
                 else (model_payload(self.deps.runtime.config, model_name) if model_name is not None else None)
             )
-            provisional = (
-                matching_handle.ai_run_progress.payload(fallback_model=model) if matching_handle is not None else None
+            provisional = _approval_note_provisional(
+                matching_handle,
+                live_model=live_model,
+                fallback_model=model,
+                shown_ai_run=shown.ai_run,
             )
             return _NoteRow(
                 reply,
@@ -1639,6 +1670,7 @@ class DeliveryGateway:
                 render(shown, state=reply.state),
                 target,
                 error_info=with_error_fallback(owed.error_info, note.text),
+                provisional=shown.ai_run,
             )
 
         sent = await self._send_note(compose)
@@ -2260,7 +2292,8 @@ class DeliveryGateway:
         def shown(progress: ProgressState) -> Presentation:
             whole = None if published is None else _take_published(published, progress.text)
             if whole is not None:
-                return whole
+                ai_run = handle.ai_run_progress.payload(fallback_model=handle.reply_model)
+                return replace(whole, ai_run=ai_run) if ai_run is not None else whole
             return handle.presentation(
                 progress.text,
                 progress.tool_trace,
@@ -2321,6 +2354,7 @@ class DeliveryGateway:
                 ),
                 placeholder=handle.base.placeholder,
                 show_tool_calls=handle.base.show_tool_calls,
+                ai_run=handle.ai_run_progress.payload(fallback_model=handle.reply_model),
             )
             canonical = shown(replace(progress, text=progress.untransformed_text))
             return terminal_write(handle, canonical, state=ReplyState.COMPLETED, frozen_display=whole)

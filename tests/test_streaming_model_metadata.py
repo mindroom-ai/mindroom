@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,11 +15,10 @@ from structlog.testing import capture_logs
 
 from mindroom import interactive
 from mindroom import reply_lifecycle as rl
+from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.ai_run_metadata import (
-    ReplyAiRunProgress,
     build_ai_run_metadata_content,
     build_prepared_history_metadata_content,
-    build_provisional_ai_run_content,
     build_streaming_ai_run_metadata_content,
     build_terminal_note_ai_run_metadata_content,
     model_payload,
@@ -45,22 +45,41 @@ from mindroom.constants import (
 from mindroom.delegation.cost import SubagentCost
 from mindroom.delivery_gateway import FinalDeliveryRequest
 from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND
-from mindroom.event_journal import ApprovalDecisionMetadata, CallKey, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalDecision,
+    ApprovalDecisionMetadata,
+    CallKey,
+    EventClass,
+    EventKind,
+    InboundEvent,
+)
+from mindroom.event_journal.approval_calls import approval_arguments_digest
 from mindroom.history.types import CompactionDecision, PreparedHistoryState
 from mindroom.live_frames.publisher import LivePublisher
 from mindroom.llm.errors import STREAM_STALLED, ProviderUnavailable
 from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.message_target import MessageTarget
 from mindroom.providers.identity import model_identity
-from mindroom.reply_presentation import AGENT_PLACEHOLDER, TEAM_PLACEHOLDER, NoteKind, Presentation
-from mindroom.reply_scope import SpanHandle
+from mindroom.reply_ai_run_progress import ReplyAiRunProgress, build_provisional_ai_run_content
+from mindroom.reply_presentation import (
+    AGENT_PLACEHOLDER,
+    TEAM_PLACEHOLDER,
+    NoteKind,
+    Presentation,
+    Segment,
+    encode_presentation,
+)
+from mindroom.reply_scope import SpanHandle, current_span, pause_decision
 from mindroom.response_sources import Owned, ResponseSources
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import FailedReply
@@ -68,7 +87,7 @@ from mindroom.turn_model import resolve_turn_model
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
-from tests.approval_continuation_helpers import dispatch_approval
+from tests.approval_continuation_helpers import approval_continuation, dispatch_approval
 from tests.bot_helpers import make_test_agent_bot
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import (
@@ -91,7 +110,7 @@ from tests.scripted_agent_helpers import raising, registered_toolkit
 from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.bot import AgentBot
@@ -647,8 +666,12 @@ async def test_agent_placeholder_streaming_and_final_metadata_lifecycle(
 
     streaming_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_STREAMING]
     assert streaming_writes
-    for write in streaming_writes:
-        _assert_provisional_ai_run(write, expected_model)
+    _assert_provisional_ai_run(streaming_writes[0], expected_model)
+    for write in streaming_writes[1:]:
+        provisional = _assert_provisional_contract(_ai_run(write))
+        assert provisional["model"] == expected_model
+        if "usage" in provisional:
+            assert provisional["usage"]["total_tokens"] == 15
 
     final_write = turn.homeserver.writes[-1]
     assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
@@ -1465,6 +1488,7 @@ async def test_approval_failure_note_carries_terminal_ai_run_with_model(
             "version": 1,
             "status": "error",
             "model": model_payload(turn.bot.config, "default"),
+            "tools": {"count": 1},
         }
     finally:
         await shutdown_approval_runtime()
@@ -1648,6 +1672,7 @@ async def test_approval_cancellation_and_restart_notes_omit_structured_error(
             "version": 1,
             "status": expected_ai_run_status,
             "model": model_payload(turn.bot.config, "default"),
+            "tools": {"count": 1},
         }
     finally:
         await shutdown_approval_runtime()
@@ -2239,6 +2264,65 @@ def _answered_model_payload(config: Config, model_name: str) -> dict[str, str]:
     return model_payload(config, model_name, model_id=identity.id, provider=identity.provider)
 
 
+async def _wait_for_writes(
+    turn: _TurnHarness,
+    predicate: Callable[[dict[str, Any]], bool],
+    *,
+    start: int = 0,
+    attempts: int = 200,
+) -> list[dict[str, Any]]:
+    """Poll ``turn.homeserver.writes[start:]`` until at least one write satisfies ``predicate``."""
+    for _ in range(attempts):
+        matched = [w for w in turn.homeserver.writes[start:] if predicate(w)]
+        if matched:
+            return matched
+        await asyncio.sleep(0.01)
+    seen = [(_stream_status(w), _visible_content(w).get("body"), _ai_run(w)) for w in turn.homeserver.writes[start:]]
+    msg = f"Timed out waiting for expected Matrix write; seen={seen!r}"
+    raise AssertionError(msg)
+
+
+@asynccontextmanager
+async def _running_task[T](
+    coro: Coroutine[Any, Any, T],
+    *gates: asyncio.Event,
+) -> AsyncIterator[asyncio.Task[T]]:
+    """Run ``coro`` as a task and guarantee every gate is released and the task cleaned up on exit."""
+    task = asyncio.create_task(coro)
+    try:
+        yield task
+    finally:
+        for gate in gates:
+            gate.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def _approve_call(turn: _TurnHarness, call_id: str, *, source_event_id: str = _SOURCE) -> ApprovalContinuation:
+    """Approve ``call_id`` on the pending approval for ``source_event_id`` and return the updated continuation."""
+    approvals = turn.bot.journal_principal().approvals
+    continuation = await approvals.approval_continuation_for_source(source_event_id)
+    assert continuation is not None
+    await approvals.resolve_approval_call(
+        CallKey(continuation.approval_id, continuation.generation, call_id),
+        requested_status="approved",
+        reason=None,
+        metadata=ApprovalDecisionMetadata(resolved_by=_REQUESTER),
+    )
+    updated = await approvals.approval_continuation(continuation.approval_id)
+    assert updated is not None
+    return updated
+
+
+async def _stop_reply(turn: _TurnHarness, receipt_order: int, *, source_event_id: str = _SOURCE) -> None:
+    """Finalize a durable user Stop on the reply created for ``source_event_id``."""
+    reply = await turn.bot.journal_principal().replies.for_sources((source_event_id,))
+    assert reply is not None
+    assert reply.event_id is not None
+    assert await turn.bot._user_stop_reconciler.finalize(reply.event_id, receipt_order, room_id=_ROOM)
+
+
 def test_provisional_ai_run_metadata_and_progress_unit(tmp_path: Path) -> None:
     """Provisional helpers omit terminal keys/floats, fall back to prepared context, and track subagent cost."""
     config = _config(tmp_path, priced=True)
@@ -2299,7 +2383,7 @@ def test_provisional_ai_run_metadata_and_progress_unit(tmp_path: Path) -> None:
     assert "cost" not in unpriced_payload
     assert unpriced_payload["tools"] == {"count": 2}
 
-    # ReplyAiRunProgress tracks prepared fallback, request updates, attempt clearing, and subagent receipts.
+    # ReplyAiRunProgress tracks prepared fallback, request updates, model switches, and subagent receipts.
     progress = ReplyAiRunProgress()
     assert not progress.has_metrics()
     progress.set_model(model_payload(config, "default"))
@@ -2332,10 +2416,11 @@ def test_provisional_ai_run_metadata_and_progress_unit(tmp_path: Path) -> None:
 
     subagent_cost = SubagentCost()
     progress.bind_subagent_cost(subagent_cost)
-    assert progress.snapshot_version() == v_updated
     subagent_cost.add({"child-1": 0.05})
     assert progress.snapshot_version() != v_updated
-    assert (progress.payload() or {})["cost"] == {"usd": "0.0024", "subagents_usd": "0.05"}
+    with_sub = _assert_provisional_contract(progress.payload())
+    assert with_sub["cost"] == {"usd": "0.0024", "subagents_usd": "0.05"}
+    assert with_sub["tools"] == {"count": 1}
 
     # Terminal note preserves provisional metrics without copying run_id/session_id.
     terminal = build_terminal_note_ai_run_metadata_content(
@@ -2349,11 +2434,13 @@ def test_provisional_ai_run_metadata_and_progress_unit(tmp_path: Path) -> None:
     assert terminal["cost"] == {"usd": "0.0024", "subagents_usd": "0.05"}
     assert terminal["tools"] == {"count": 1}
 
-    progress.clear_attempt_scope()
-    cleared = progress.payload() or {}
-    assert "context" not in cleared
-    assert "tools" not in cleared
-    assert cleared["usage"]["total_tokens"] == 1_050
+    # Switching models keeps cumulative spend while dropping attempt-local context and tools.
+    progress.set_model(model_payload(config, "large"))
+    switched = progress.payload() or {}
+    assert switched["model"] == model_payload(config, "large")
+    assert "context" not in switched
+    assert "tools" not in switched
+    assert switched["usage"]["total_tokens"] == 1_050
 
 
 @pytest.mark.asyncio
@@ -2399,27 +2486,17 @@ async def test_streaming_blocked_tool_emits_live_usage_and_stop_preserves_it(
         placeholder_model = model_payload(turn.bot.config, "default")
         answered_model = _answered_model_payload(turn.bot.config, "default")
 
-        task = asyncio.create_task(turn.runner.generate_response(_plain_request(_target())))
-        try:
+        async with _running_task(turn.runner.generate_response(_plain_request(_target())), tool_release) as task:
             await asyncio.wait_for(tool_started.wait(), timeout=10)
-            for _ in range(100):
-                if any(
-                    _stream_status(w) == STREAM_STATUS_STREAMING and "usage" in (_ai_run(w) or {})
-                    for w in turn.homeserver.writes
-                ):
-                    break
-                await asyncio.sleep(0.01)
+            live_edits = await _wait_for_writes(
+                turn,
+                lambda w: _stream_status(w) == STREAM_STATUS_STREAMING and "usage" in (_ai_run(w) or {}),
+            )
 
             placeholder = turn.homeserver.writes[0]
             assert _stream_status(placeholder) == STREAM_STATUS_PENDING
             _assert_provisional_ai_run(placeholder, placeholder_model)
 
-            live_edits = [
-                w
-                for w in turn.homeserver.writes
-                if _stream_status(w) == STREAM_STATUS_STREAMING and "usage" in (_ai_run(w) or {})
-            ]
-            assert live_edits
             live_ai_run = _assert_provisional_contract(_ai_run(live_edits[-1]))
             assert live_ai_run["model"] == answered_model
             assert live_ai_run["usage"] == {
@@ -2433,16 +2510,8 @@ async def test_streaming_blocked_tool_emits_live_usage_and_stop_preserves_it(
             assert live_ai_run["context"] == {"input_tokens": 1_000, "window_tokens": 100_000}
             assert live_ai_run["tools"] == {"count": 1}
 
-            reply = await turn.bot.journal_principal().replies.for_sources((_SOURCE,))
-            assert reply is not None
-            assert reply.event_id is not None
-            assert await turn.bot._user_stop_reconciler.finalize(reply.event_id, 11, room_id=_ROOM)
+            await _stop_reply(turn, 11)
             await asyncio.wait_for(task, timeout=10)
-        finally:
-            tool_release.set()
-            if not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
 
     cancelled_write = turn.homeserver.writes[-1]
     assert _stream_status(cancelled_write) == STREAM_STATUS_CANCELLED
@@ -2455,6 +2524,65 @@ async def test_streaming_blocked_tool_emits_live_usage_and_stop_preserves_it(
         "context": {"input_tokens": 1_000, "window_tokens": 100_000},
         "tools": {"count": 1},
     }
+
+
+@pytest.mark.asyncio
+async def test_mid_request_usage_reported_updates_live_edit_without_double_counting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mid-request UsageReported(final=False) updates live edits before completion without double-counting."""
+    gate = asyncio.Event()
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        priced=True,
+        scripts={
+            "default": [
+                [
+                    UsageReported(usage(1_200, 30), final=False),
+                    TextDelta("Streaming "),
+                    Await(gate.wait),
+                    TextDelta("complete."),
+                    UsageReported(usage(1_200, 80), final=True),
+                    TurnCompleted(
+                        message=Message(role="assistant", content="Streaming complete.", metrics=usage(1_200, 80)),
+                        stop_reason="end",
+                    ),
+                ],
+            ],
+        },
+    )
+
+    async with _running_task(turn.runner.generate_response(_plain_request(_target())), gate) as task:
+        live_edits = await _wait_for_writes(
+            turn,
+            lambda w: (
+                _stream_status(w) == STREAM_STATUS_STREAMING and "Streaming" in str(_visible_content(w).get("body", ""))
+            ),
+        )
+        live_ai_run = _assert_provisional_contract(_ai_run(live_edits[-1]))
+        assert live_ai_run["model"] == _answered_model_payload(turn.bot.config, "default")
+        assert live_ai_run["usage"]["input_tokens"] == 1_200
+        assert live_ai_run["usage"]["output_tokens"] == 30
+        assert live_ai_run["usage"]["total_tokens"] == 1_230
+        # 1200 * 2/1e6 + 30 * 8/1e6 = 0.00264
+        assert live_ai_run["cost"] == {"usd": "0.00264"}
+        assert live_ai_run["context"] == {"input_tokens": 1_200, "window_tokens": 100_000}
+
+        gate.set()
+        assert await asyncio.wait_for(task, timeout=10) == Owned()
+
+    final_ai_run = _ai_run(turn.homeserver.writes[-1])
+    assert final_ai_run is not None
+    assert final_ai_run["status"] == "completed"
+    # Final counts the single request exactly once (no double-counting from the mid-request projection).
+    assert final_ai_run["usage"]["input_tokens"] == 1_200
+    assert final_ai_run["usage"]["output_tokens"] == 80
+    assert final_ai_run["usage"]["total_tokens"] == 1_280
+    # 1200 * 2/1e6 + 80 * 8/1e6 = 0.00304
+    assert final_ai_run["cost"] == {"usd": "0.00304"}
+    assert final_ai_run["context"] == {"input_tokens": 1_200, "window_tokens": 100_000}
 
 
 @pytest.mark.asyncio
@@ -2483,22 +2611,10 @@ async def test_mid_stream_stop_captures_cutoff_usage_on_cancelled_note(
             ],
         },
     )
-    task = asyncio.create_task(turn.runner.generate_response(_plain_request(_target())))
-    try:
-        for _ in range(100):
-            if any(_stream_status(w) == STREAM_STATUS_STREAMING for w in turn.homeserver.writes):
-                break
-            await asyncio.sleep(0.01)
-        reply = await turn.bot.journal_principal().replies.for_sources((_SOURCE,))
-        assert reply is not None
-        assert reply.event_id is not None
-        assert await turn.bot._user_stop_reconciler.finalize(reply.event_id, 12, room_id=_ROOM)
+    async with _running_task(turn.runner.generate_response(_plain_request(_target())), gate) as task:
+        await _wait_for_writes(turn, lambda w: _stream_status(w) == STREAM_STATUS_STREAMING)
+        await _stop_reply(turn, 12)
         await asyncio.wait_for(task, timeout=10)
-    finally:
-        gate.set()
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
     cancelled_write = turn.homeserver.writes[-1]
     assert _stream_status(cancelled_write) == STREAM_STATUS_CANCELLED
@@ -2535,18 +2651,16 @@ async def test_model_switch_accumulates_prior_usage_without_double_counting(
             "large": [_gated_answer("On large ", switch_gate, "now.", metrics=usage(2_000, 200))],
         },
     )
-    task = asyncio.create_task(turn_switch.runner.generate_response(_plain_request(_target(thread_id=_THREAD))))
-    try:
-        for _ in range(200):
-            if any("On large" in str(_visible_content(w).get("body", "")) for w in turn_switch.homeserver.writes):
-                break
-            await asyncio.sleep(0.01)
-        switched_live = [
-            w
-            for w in turn_switch.homeserver.writes
-            if _stream_status(w) == STREAM_STATUS_STREAMING and "On large" in str(_visible_content(w).get("body", ""))
-        ]
-        assert switched_live
+    async with _running_task(
+        turn_switch.runner.generate_response(_plain_request(_target(thread_id=_THREAD))),
+        switch_gate,
+    ) as task:
+        switched_live = await _wait_for_writes(
+            turn_switch,
+            lambda w: (
+                _stream_status(w) == STREAM_STATUS_STREAMING and "On large" in str(_visible_content(w).get("body", ""))
+            ),
+        )
         live_ai_run = _assert_provisional_contract(_ai_run(switched_live[-1]))
         assert live_ai_run["model"] == model_payload(turn_switch.bot.config, "large")
         assert live_ai_run["usage"]["input_tokens"] == 1_000
@@ -2555,11 +2669,6 @@ async def test_model_switch_accumulates_prior_usage_without_double_counting(
         assert "tools" not in live_ai_run
         switch_gate.set()
         assert await asyncio.wait_for(task, timeout=10) == Owned()
-    finally:
-        switch_gate.set()
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
     final_switch = _ai_run(turn_switch.homeserver.writes[-1])
     assert final_switch is not None
@@ -2592,18 +2701,13 @@ async def test_delegated_child_updates_parent_subagents_usd_without_clobbering_l
     turn_delegate.bot.config.background_tool_jobs.enabled = False
     parent_model = _answered_model_payload(turn_delegate.bot.config, "default")
 
-    task2 = asyncio.create_task(turn_delegate.runner.generate_response(_plain_request(_target())))
-    try:
-        for _ in range(200):
-            if any("Parent" in str(_visible_content(w).get("body", "")) for w in turn_delegate.homeserver.writes):
-                break
-            await asyncio.sleep(0.01)
-        parent_live = [
-            w
-            for w in turn_delegate.homeserver.writes
-            if _stream_status(w) == STREAM_STATUS_STREAMING and "Parent" in str(_visible_content(w).get("body", ""))
-        ]
-        assert parent_live
+    async with _running_task(turn_delegate.runner.generate_response(_plain_request(_target())), parent_gate) as task:
+        parent_live = await _wait_for_writes(
+            turn_delegate,
+            lambda w: (
+                _stream_status(w) == STREAM_STATUS_STREAMING and "Parent" in str(_visible_content(w).get("body", ""))
+            ),
+        )
         live_ai_run = _assert_provisional_contract(_ai_run(parent_live[-1]))
         # Parent keeps its own model, tokens, and context; child cost appears strictly under subagents_usd.
         assert live_ai_run["model"] == parent_model
@@ -2612,12 +2716,7 @@ async def test_delegated_child_updates_parent_subagents_usd_without_clobbering_l
         assert live_ai_run["context"] == {"input_tokens": 1_000, "window_tokens": 100_000}
         assert live_ai_run["cost"] == {"usd": "0.0024", "subagents_usd": "0.0048"}
         parent_gate.set()
-        assert await asyncio.wait_for(task2, timeout=10) == Owned()
-    finally:
-        parent_gate.set()
-        if not task2.done():
-            task2.cancel()
-            await asyncio.gather(task2, return_exceptions=True)
+        assert await asyncio.wait_for(task, timeout=10) == Owned()
 
 
 @pytest.mark.asyncio
@@ -2694,6 +2793,281 @@ async def test_approval_pause_and_resume_carry_live_usage(
 
 
 @pytest.mark.asyncio
+async def test_pause_then_stop_without_resume_and_owed_note_preserve_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """Stopping a paused reply without resuming and flushing an owed note both preserve persisted provisional metrics."""
+    del echo_tool
+    turn = await _setup_turn(
+        tmp_path / "pause-stop",
+        monkeypatch,
+        tools=[_ECHO_TOOL],
+        priced=True,
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi"), metrics=usage(1_000, 100))]},
+    )
+    turn.bot.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+    _install_approval_store(turn)
+    try:
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        assert current_span() is None
+        pause_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_APPROVAL_PENDING]
+        assert pause_writes
+        pause_ai_run = _assert_provisional_contract(_ai_run(pause_writes[-1]))
+        assert pause_ai_run["usage"]["input_tokens"] == 1_000
+        assert pause_ai_run["usage"]["output_tokens"] == 100
+        assert pause_ai_run["cost"] == {"usd": "0.0028"}
+        assert pause_ai_run["context"] == {"input_tokens": 1_000, "window_tokens": 100_000}
+        assert pause_ai_run["tools"] == {"count": 1}
+
+        # Stop WITHOUT resuming (no live span): settle the fenced approval and verify cancelled note keeps metrics.
+        await _stop_reply(turn, 21)
+        assert await turn.runner.handoff_approval_source(_SOURCE) is False
+        await turn.runner.inbox.wait_for_source_owned_inbox_responses()
+
+        cancelled_write = turn.homeserver.writes[-1]
+        assert _stream_status(cancelled_write) == STREAM_STATUS_CANCELLED
+        assert _ai_run(cancelled_write) == {
+            "version": 1,
+            "status": "cancelled",
+            "model": _answered_model_payload(turn.bot.config, "default"),
+            "usage": pause_ai_run["usage"],
+            "cost": {"usd": "0.0028"},
+            "context": {"input_tokens": 1_000, "window_tokens": 100_000},
+            "tools": {"count": 1},
+        }
+    finally:
+        await shutdown_approval_runtime()
+
+    # Owed interruption note flushed without a live span also falls back to Presentation.ai_run.
+    turn_owed = await _setup_turn(
+        tmp_path / "owed",
+        monkeypatch,
+        priced=True,
+        scripts={"default": [answer("unused")]},
+    )
+    saved_ai_run = {
+        "version": 1,
+        "model": _answered_model_payload(turn_owed.bot.config, "default"),
+        "usage": {"input_tokens": 600, "output_tokens": 40, "total_tokens": 640, "uncached_input_tokens": 600},
+        "cost": {"usd": "0.00152"},
+        "context": {"input_tokens": 600, "window_tokens": 100_000},
+        "tools": {"count": 1},
+    }
+    claimed = await turn_owed.bot._reply_runtime.claim(
+        sources=ResponseSources((_SOURCE,), (_SOURCE,)),
+        room_id=_ROOM,
+        thread_id=None,
+        placeholder=AGENT_PLACEHOLDER,
+        show_tool_calls=True,
+    )
+    assert isinstance(claimed, SpanHandle)
+    await turn_owed.bot.journal_principal().replies.update(
+        claimed.reply_id,
+        lambda current: rl.Transition(
+            outcome=rl.Outcome.APPLIED,
+            reply=replace(
+                current,
+                event_id="$owed-ev",
+                state=rl.ReplyState.FAILED,
+                presentation=encode_presentation(
+                    Presentation(
+                        segments=(Segment(kind="answer", text="Partial work", span_id=claimed.span_id),),
+                        ai_run=saved_ai_run,
+                    ),
+                ),
+                owed_write=rl.OwedWrite(
+                    span_id=claimed.span_id,
+                    note=NoteKind.INTERRUPTED,
+                    text=None,
+                ),
+            ),
+        ),
+    )
+    gateway = unwrap_extracted_collaborator(turn_owed.bot._delivery_gateway)
+    await gateway._flush_owed_write(claimed.reply_id)
+    owed_write = turn_owed.homeserver.writes[-1]
+    assert _stream_status(owed_write) == STREAM_STATUS_ERROR
+    assert _ai_run(owed_write) == {**saved_ai_run, "status": "error"}
+
+
+@pytest.mark.asyncio
+async def test_cli_approval_recovery_preserves_checkpointed_attempt_spend_live_and_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """CLI approval recovery preserves the checkpointed attempt's spend on live resumed edits and the final edit."""
+    del echo_tool
+    follow_up_gate = asyncio.Event()
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=["shell", _ECHO_TOOL],
+        priced=True,
+        scripts={"default": [_gated_answer("Recovered ", follow_up_gate, "answer.", metrics=usage(2_000, 200))]},
+    )
+    turn.bot.config.background_tool_jobs.enabled = False
+    monkeypatch.setattr("mindroom.agent_cli.response_owner.minimal_shell_problems", lambda *_args: [])
+    monkeypatch.setattr(
+        "mindroom.agent_cli.response_owner.agent_cli_shell_env",
+        lambda _config, _runtime_paths, _agent_name, token: AgentCliShellEnv("http://127.0.0.1:8765", token),
+    )
+    _install_approval_store(turn)
+    try:
+        # Persist a checkpointed cancelled minimal run with nonzero priced spend.
+        session_id = _target().session_id
+        checkpoint_metrics = RunMetrics()
+        checkpoint_metrics.add(usage(1_000, 100), model_id="gpt-primary", provider="OpenAI")
+        persisted = RunRecord(
+            run_id="cli-saved-run",
+            session_id=session_id,
+            agent_id="general",
+            status=RunStatus.cancelled,
+            model="gpt-primary",
+            model_provider="OpenAI",
+            model_name="default",
+            metrics=checkpoint_metrics,
+            metadata={"agent_mode": "minimal"},
+            messages=[
+                Message(role="user", content="Run hidden echo"),
+                Message(
+                    role="assistant",
+                    content="Checking...",
+                    metrics=usage(1_000, 100),
+                    meta=MessageMeta(model=ModelProvenance("gpt-primary", "OpenAI")),
+                ),
+            ],
+        )
+        storage = create_session_storage("general", turn.bot.config, runtime_paths_for(turn.bot.config), None)
+        storage.save_run(
+            ConversationSession(session_id=session_id, kind="agent", owner_id="general"),
+            persisted,
+            record_usage=False,
+        )
+
+        echo_args = {"text": "hi"}
+        requirement = RunRequirement(
+            ToolExecution(
+                tool_call_id="hidden-echo",
+                tool_name="echo",
+                tool_args=echo_args,
+                requires_confirmation=True,
+            ),
+        )
+        claimed = await turn.bot._reply_runtime.claim(
+            sources=ResponseSources((_SOURCE,), (_SOURCE,)),
+            room_id=_ROOM,
+            thread_id=None,
+            placeholder=AGENT_PLACEHOLDER,
+            show_tool_calls=True,
+        )
+        assert isinstance(claimed, SpanHandle)
+        await turn.bot.journal_principal().replies.update(
+            claimed.reply_id,
+            lambda current: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(current, event_id="$cli-paused")),
+        )
+        paused_reply = await turn.bot.journal_principal().replies.load(claimed.reply_id)
+        assert paused_reply is not None
+        claimed.note_reply(paused_reply)
+
+        expected_identity = turn.runner.deps.tool_runtime.build_turn_context(
+            _target(),
+            user_id=_REQUESTER,
+            agent_name="general",
+            active_model_name="default",
+            turn_id=None,
+        ).execution_identity
+        continuation = approval_continuation(
+            approval_id="cli-approval-1",
+            correlation_id=_SOURCE,
+            run_id="cli-saved-run",
+            session_id=session_id,
+            entity_name="general",
+            room_id=_ROOM,
+            thread_id=None,
+            requester_id=_REQUESTER,
+            execution_identity=expected_identity,
+            response_event_id="$cli-paused",
+            sources=ResponseSources((_SOURCE,), (_SOURCE,)),
+            final_delivery_id=claimed.span.delivery_id,
+            runtime_model_name="default",
+            request_body="Run hidden echo",
+            state="ready",
+            calls=(
+                ApprovalCall(
+                    "hidden-echo",
+                    "echo",
+                    "general",
+                    100,
+                    decision=ApprovalDecision.APPROVED,
+                    toolkit_name=_ECHO_TOOL,
+                    arguments_digest=approval_arguments_digest(echo_args),
+                ),
+            ),
+            cli_call={
+                "kind": "agent_cli",
+                "delegation_depth": 0,
+                "toolkit": _ECHO_TOOL,
+                "function": "echo",
+                "arguments": echo_args,
+                "call_id": "hidden-echo",
+                "parent_bash_call_id": "bash-parent",
+                "pending_calls": [requirement.tool_execution.to_dict()],
+            },
+        )
+        gateway = unwrap_extracted_collaborator(turn.bot._delivery_gateway)
+        assert await gateway.pause_shown_reply(
+            claimed,
+            pause_decision(
+                claimed,
+                Presentation(segments=(Segment(kind="answer", text="Checking..."),)),
+                in_place=False,
+                stage=None,
+            ),
+            enqueue=lambda req, row: turn.bot.journal_principal().approvals.pause_for_approval(continuation, req, row),
+        )
+        stored = await turn.bot.journal_principal().approvals.approval_continuation(continuation.approval_id)
+        assert stored is not None
+
+        writes_before = len(turn.homeserver.writes)
+        async with _running_task(
+            dispatch_approval(turn.runner.approvals, stored, target=_target()),
+            follow_up_gate,
+        ) as task:
+            live_edits = await _wait_for_writes(
+                turn,
+                lambda w: (
+                    _stream_status(w) == STREAM_STATUS_STREAMING
+                    and "Recovered" in str(_visible_content(w).get("body", ""))
+                ),
+                start=writes_before,
+            )
+            live_ai_run = _assert_provisional_contract(_ai_run(live_edits[-1]))
+            # Follow-up streaming edit preserves checkpointed attempt's spend before follow-up request settles.
+            assert live_ai_run["usage"]["input_tokens"] == 1_000
+            assert live_ai_run["usage"]["output_tokens"] == 100
+            assert live_ai_run["cost"] == {"usd": "0.0028"}
+
+            follow_up_gate.set()
+            await asyncio.wait_for(task, timeout=10)
+
+        final_ai_run = _ai_run(turn.homeserver.writes[-1])
+        assert final_ai_run is not None
+        assert final_ai_run["status"] == "completed"
+        # Final counts checkpoint (1000/100 @ 0.0028) + follow-up (2000/200 @ 0.0056) exactly once.
+        assert final_ai_run["usage"]["input_tokens"] == 3_000
+        assert final_ai_run["usage"]["output_tokens"] == 300
+        assert final_ai_run["cost"] == {"usd": "0.0084"}
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.asyncio
 async def test_team_streaming_aggregates_leader_and_member_usage_with_leader_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2733,48 +3107,37 @@ async def test_team_streaming_aggregates_leader_and_member_usage_with_leader_con
         turn.bot.config.background_tool_jobs.enabled = False
         leader_model = _answered_model_payload(turn.bot.config, "default")
 
-        task = asyncio.create_task(
+        async with _running_task(
             turn.runner.generate_team_response_helper(
                 _plain_request(_target()),
                 member_names=["writer", "checker"],
                 team_mode="collaborate",
             ),
-        )
-        try:
+            member_tool_release,
+            consensus_gate,
+        ) as task:
             # While writer's tool blocks, active_members already contributes writer's Request #1 + tool to live edits.
             await asyncio.wait_for(member_tool_started.wait(), timeout=10)
-            for _ in range(200):
-                if any(
-                    (_ai_run(w) or {}).get("usage", {}).get("input_tokens", 0) >= 1_500
-                    for w in turn.homeserver.writes
-                    if _stream_status(w) == STREAM_STATUS_STREAMING
-                ):
-                    break
-                await asyncio.sleep(0.01)
-            mid_member_edits = [
-                w
-                for w in turn.homeserver.writes
-                if _stream_status(w) == STREAM_STATUS_STREAMING
-                and (_ai_run(w) or {}).get("usage", {}).get("input_tokens", 0) >= 1_500
-            ]
-            assert mid_member_edits
+            mid_member_edits = await _wait_for_writes(
+                turn,
+                lambda w: (
+                    _stream_status(w) == STREAM_STATUS_STREAMING
+                    and (_ai_run(w) or {}).get("usage", {}).get("input_tokens", 0) >= 1_500
+                ),
+            )
             mid_ai_run = _assert_provisional_contract(_ai_run(mid_member_edits[-1]))
             assert mid_ai_run["model"] == leader_model
             assert mid_ai_run["context"] == {"input_tokens": 1_000, "window_tokens": 100_000}
             assert mid_ai_run["tools"]["count"] >= 2
 
             member_tool_release.set()
-            for _ in range(200):
-                if any("Final synthesis" in str(_visible_content(w).get("body", "")) for w in turn.homeserver.writes):
-                    break
-                await asyncio.sleep(0.01)
-            consensus_edits = [
-                w
-                for w in turn.homeserver.writes
-                if _stream_status(w) == STREAM_STATUS_STREAMING
-                and "Final synthesis" in str(_visible_content(w).get("body", ""))
-            ]
-            assert consensus_edits
+            consensus_edits = await _wait_for_writes(
+                turn,
+                lambda w: (
+                    _stream_status(w) == STREAM_STATUS_STREAMING
+                    and "Final synthesis" in str(_visible_content(w).get("body", ""))
+                ),
+            )
             live_ai_run = _assert_provisional_contract(_ai_run(consensus_edits[-1]))
             assert live_ai_run["model"] == leader_model
             # Context reflects leader's Request #1 (1_000 / 100_000), never a member's window or prompt size.
@@ -2786,12 +3149,112 @@ async def test_team_streaming_aggregates_leader_and_member_usage_with_leader_con
             assert live_ai_run["tools"] == {"count": 2}
             consensus_gate.set()
             assert await asyncio.wait_for(task, timeout=10) == Owned()
+
+
+@pytest.mark.asyncio
+async def test_team_approval_resume_preserves_pre_pause_member_usage_on_live_and_final_edits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    echo_tool: None,
+) -> None:
+    """When Member A finishes before Member B pauses, resumed live edits AND final edit keep Leader + A + B."""
+    del echo_tool
+    resume_gate = asyncio.Event()
+
+    class _WriterTool(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="writer_tools", tools=[self.writer_step])
+
+        async def writer_step(self) -> str:
+            return "drafted"
+
+    with registered_toolkit("streaming_writer_step", _WriterTool):
+        turn = await _setup_turn(
+            tmp_path,
+            monkeypatch,
+            priced=True,
+            scripts={
+                "default": [
+                    calls(tool_call("delegate_task_to_members", "del-1", task="Work"), metrics=usage(1_000, 100)),
+                    _gated_answer("Combined ", resume_gate, "result.", metrics=usage(2_000, 200)),
+                ],
+                "writer-model": [
+                    calls(tool_call("writer_step", "w1"), metrics=usage(400, 40)),
+                    answer("Writer finished.", usage(200, 20)),
+                ],
+                "checker-model": [
+                    calls(tool_call("echo", "call-1", text="verify"), metrics=usage(300, 30)),
+                    answer("Checker approved.", usage(100, 10)),
+                ],
+            },
+        )
+        turn.bot.config.agents["writer"].tools = ["streaming_writer_step"]
+        turn.bot.config.agents["checker"].tools = [_ECHO_TOOL]
+        turn.bot.config.tool_approval = ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
+        )
+        turn.bot.config.background_tool_jobs.enabled = False
+        leader_model = _answered_model_payload(turn.bot.config, "default")
+        _install_approval_store(turn)
+        try:
+            assert (
+                await turn.runner.generate_team_response_helper(
+                    _plain_request(_target()),
+                    member_names=["writer", "checker"],
+                    team_mode="collaborate",
+                )
+                == Owned()
+            )
+            pause_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_APPROVAL_PENDING]
+            assert pause_writes
+            pause_ai_run = _assert_provisional_contract(_ai_run(pause_writes[-1]))
+            # Leader (1000/100 @ 0.0028) + writer (600/60 @ 0.00084) + checker pre-pause (300/30 @ 0.00042).
+            assert pause_ai_run["usage"]["input_tokens"] == 1_900
+            assert pause_ai_run["usage"]["output_tokens"] == 190
+            assert pause_ai_run["cost"] == {"usd": "0.00406"}
+            assert pause_ai_run["tools"] == {"count": 3}
+
+            updated = await _approve_call(turn, "call-1")
+            writes_before = len(turn.homeserver.writes)
+
+            async with _running_task(
+                dispatch_approval(turn.runner.approvals, updated, target=_target()),
+                resume_gate,
+            ) as resume_task:
+                live_edits = await _wait_for_writes(
+                    turn,
+                    lambda w: (
+                        _stream_status(w) == STREAM_STATUS_STREAMING
+                        and "Combined" in str(_visible_content(w).get("body", ""))
+                    ),
+                    start=writes_before,
+                )
+                live_ai_run = _assert_provisional_contract(_ai_run(live_edits[-1]))
+                assert live_ai_run["model"] == leader_model
+                assert live_ai_run["context"] == {"input_tokens": 1_000, "window_tokens": 100_000}
+                # Leader Req #1 (1000/100) + writer (600/60) + checker total (400/40) = 2000/200, cost 0.0042.
+                assert live_ai_run["usage"]["input_tokens"] == 2_000
+                assert live_ai_run["usage"]["output_tokens"] == 200
+                assert live_ai_run["cost"] == {"usd": "0.0042"}
+                assert live_ai_run["tools"] == {"count": 3}
+
+                resume_gate.set()
+                await asyncio.wait_for(resume_task, timeout=10)
+
+            final_write = turn.homeserver.writes[-1]
+            assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
+            # Pre-pause completed member output is not duplicated by handover reconciliation.
+            assert str(_visible_content(final_write).get("body", "")).count("Writer finished.") == 1
+            final_ai_run = _ai_run(final_write)
+            assert final_ai_run is not None
+            assert final_ai_run["status"] == "completed"
+            # Leader (3000/300 @ 0.0084) + writer (600/60 @ 0.00084) + checker (400/40 @ 0.00056) = 4000/400, 0.0098.
+            assert final_ai_run["usage"]["input_tokens"] == 4_000
+            assert final_ai_run["usage"]["output_tokens"] == 400
+            assert final_ai_run["cost"] == {"usd": "0.0098"}
+            assert final_ai_run["tools"] == {"count": 3}
         finally:
-            member_tool_release.set()
-            consensus_gate.set()
-            if not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            await shutdown_approval_runtime()
 
 
 @pytest.mark.asyncio

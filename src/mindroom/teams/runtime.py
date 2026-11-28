@@ -443,15 +443,26 @@ async def _drive_team(
     async def produce(emit: Emit) -> None:
         members: _MemberRuns
 
-        def notify_usage() -> None:
+        def notify_usage(
+            leader_record: TeamRunRecord | None = None,
+            leader_messages: Sequence[Message] | None = None,
+        ) -> None:
             if on_usage_updated is None:
                 return
+            active_leader = record if leader_record is None else leader_record
+            active_messages = messages if leader_messages is None else leader_messages
             by_id: dict[str, RunRecord] = {run.run_id: run for run in record.ended_member_runs}
             by_id.update(members.active_members)
             try:
-                on_usage_updated(record, messages, tuple(by_id.values()))
+                on_usage_updated(active_leader, active_messages, tuple(by_id.values()))
             except Exception:
                 logger.warning("team_usage_progress_hook_failed", team_id=record.team_id, exc_info=True)
+
+        def note_leader_usage(state: LoopState) -> None:
+            if isinstance(state.record, TeamRunRecord):
+                notify_usage(state.record, state.messages)
+            else:
+                notify_usage()
 
         members = _MemberRuns(
             record,
@@ -465,7 +476,7 @@ async def _drive_team(
             if on_usage_updated is None
             else replace(
                 hooks,
-                on_usage_updated=_compose_usage_hooks(hooks.on_usage_updated, lambda _state: notify_usage()),
+                on_usage_updated=_compose_usage_hooks(hooks.on_usage_updated, note_leader_usage),
             )
         )
         leader = _leader_spec(spec, record, members.run)

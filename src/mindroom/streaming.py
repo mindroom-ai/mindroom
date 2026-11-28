@@ -70,12 +70,12 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.reply_compactions import ReplyCompactions
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.message_target import MessageTarget
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import WorkerProgressEvent, WorkerProgressPump
@@ -2705,20 +2705,9 @@ async def _publish_progress_chunk(
     delivery_queue: asyncio.Queue[_DeliveryRequest | None],
     chunk: StructuredStreamChunk,
     *,
-    published: bool,
     apply_presentation: Callable[[str], None],
-) -> bool:
-    if chunk.tool_progress is not None:
-        # Only live frames show it; no write carries it.
-        streaming.replace_tool_progress(chunk.tool_progress)
-    trace_changed = False
-    if chunk.tool_trace is not None:
-        # Callers keep mutating their trace entries; hold the published state.
-        trace_changed = streaming.replace_tool_trace(chunk.tool_trace)
-    if not published:
-        streaming.accumulated_text = chunk.content
-        _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
-        return True
+) -> None:
+    trace_changed = chunk.tool_trace is not None and streaming.replace_tool_trace(chunk.tool_trace)
     if chunk.content != streaming.accumulated_text or (trace_changed and streaming.show_tool_calls):
         await _apply_visible_text_chunk(
             streaming,
@@ -2729,7 +2718,6 @@ async def _publish_progress_chunk(
         )
     elif streaming.has_uncommitted_ai_run():
         _queue_delivery_request(delivery_queue, progress_hint=True)
-    return True
 
 
 @asynccontextmanager
@@ -2805,11 +2793,21 @@ async def stream_progress_edits(
             nonlocal published
             if delivery_task.done():
                 return
-            published = await _publish_progress_chunk(
+            if chunk.tool_progress is not None:
+                # Only live frames show it; no write carries it.
+                streaming.replace_tool_progress(chunk.tool_progress)
+            if not published:
+                published = True
+                if chunk.tool_trace is not None:
+                    # Callers keep mutating their trace entries; hold the published state.
+                    streaming.replace_tool_trace(chunk.tool_trace)
+                streaming.accumulated_text = chunk.content
+                _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
+                return
+            await _publish_progress_chunk(
                 streaming,
                 delivery_queue,
                 chunk,
-                published=published,
                 apply_presentation=apply_presentation,
             )
 

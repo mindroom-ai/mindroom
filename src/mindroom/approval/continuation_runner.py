@@ -466,6 +466,8 @@ class ApprovalContinuationRunner:
         if runtime_model_name is not None:
             model = model_payload(self.deps.runtime.config, runtime_model_name)
             handle.reply_model = model
+            # Keep the answering/fallback model and live metrics already recorded by the run; only seed the
+            # configured runtime model when no provisional metrics have been recorded yet.
             if not handle.ai_run_progress.has_metrics():
                 handle.ai_run_progress.set_model(model)
         extra_content.update(handle.ai_run_progress.content(fallback_model=handle.reply_model))
@@ -594,11 +596,14 @@ class ApprovalContinuationRunner:
         reply = await handle.runtime.store.replies.load(handle.reply_id)
         assert reply is not None
         handle.note_reply(reply)
+        shown = decode_presentation(reply.presentation)
+        if (ai_run := handle.ai_run_progress.payload(fallback_model=handle.reply_model)) is not None:
+            shown = replace(shown, ai_run=ai_run)
         await self.deps.delivery_gateway.end_reply_span(
             handle,
             pause_decision(
                 handle,
-                decode_presentation(reply.presentation),
+                shown,
                 in_place=False,
                 stage=None,
             ),
@@ -660,16 +665,19 @@ class ApprovalContinuationRunner:
 
         A rule that refuses the pause (a Stop committed while it was prepared) raises ``ReplyWriteRefusedError``.
         """
+        extra_content = self._pause_extra_content(
+            stream_status,
+            runtime_model_name=hold.runtime_model_name,
+            handle=handle,
+        )
+        if (ai_run := handle.ai_run_progress.payload(fallback_model=handle.reply_model)) is not None:
+            shown = replace(shown, ai_run=ai_run)
         return await self.deps.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=event_id,
                 new_text=text,
-                extra_content=self._pause_extra_content(
-                    stream_status,
-                    runtime_model_name=hold.runtime_model_name,
-                    handle=handle,
-                ),
+                extra_content=extra_content,
                 tool_trace=list(tool_trace) or None,
                 reply_write=pause_write(
                     handle,

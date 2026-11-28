@@ -86,7 +86,6 @@ from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
-    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_messages import TurnMessages
@@ -97,6 +96,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
     from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.response_turn import TurnRunState
     from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime

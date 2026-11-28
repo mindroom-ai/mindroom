@@ -34,7 +34,7 @@ from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, pause_without_approval_error, paused_attempt_from_response
 from mindroom.run_storage import scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
-from mindroom.teams.leader import LeaderRun, team_usage_progress_hook
+from mindroom.teams.leader import LeaderRun, seed_team_resume_ai_run
 from mindroom.teams.members import (
     build_team_spec,
     materialized_team_label,
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.run import ApprovedCall
-    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -69,17 +68,18 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
     from mindroom.llm.runs import AnyRunRecord, RunRequirement
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
-    from mindroom.teams.runtime import TeamCallKey, TeamRunEvent, TeamUsageHook
+    from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
-    """Return the paused team run the approval names from the session ``scope`` loaded, which holds its paused runs.
+def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> tuple[TeamRunRecord, frozenset[str]]:
+    """Return the paused team run with pre-pause member runs hydrated, and the pre-pause finished member run IDs.
 
     A run of another session of the scope, or of a session with no stored row, is refused, as the agent path refuses it.
     """
@@ -88,7 +88,7 @@ def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunR
     if not isinstance(persisted, TeamRunRecord) or persisted.status is not RunStatus.paused:
         msg = f"Paused team run {run_id!r} is no longer available"
         raise RuntimeError(msg)
-    return persisted
+    return _hydrate_paused_team_member_runs(persisted, runs)
 
 
 def _route_decisions(
@@ -292,36 +292,40 @@ async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
             await member.ensure_built()
 
 
-def _seed_team_resume_ai_run(
-    live_ai_run: ReplyAiRunProgress | None,
-    *,
-    config: Config,
-    model_name: str,
+def _show_resumed_handovers(
+    attempt: TeamAttempt,
+    continued: TeamRunRecord,
+    pre_pause_finished_ids: frozenset[str],
+) -> None:
+    """Append unshown handover text for the leader and member runs that executed during this resume."""
+    for run in (
+        continued,
+        *(member for member in continued.ended_member_runs if member.run_id not in pre_pause_finished_ids),
+    ):
+        attempt.show_unshown_handover(run)
+
+
+def _hydrate_paused_team_member_runs(
     persisted: TeamRunRecord,
-    storage: RunStorage,
-    run_id: str,
-    subagent_cost: SubagentCost,
-) -> TeamUsageHook | None:
-    """Seed live provisional metadata from a paused team run and return its resumed usage hook."""
-    if live_ai_run is None:
-        return None
-    stored_member_runs = tuple(
-        row for row in storage.session.runs if isinstance(row, RunRecord) and row.parent_run_id == run_id
-    )
-    live_ai_run.seed_from_paused(
-        config,
-        model_name=model_name,
-        persisted=persisted,
-        subagent_cost=subagent_cost,
-        member_runs=stored_member_runs,
-    )
-    return team_usage_progress_hook(
-        live_ai_run,
-        config=config,
-        model_name=model_name,
-        prepared_history=None,
-        prior_member_runs=stored_member_runs,
-    )
+    session_runs: Sequence[AnyRunRecord],
+) -> tuple[TeamRunRecord, frozenset[str]]:
+    """Restore pre-pause member runs onto a reloaded paused team record, returning ``(hydrated, pre_pause_finished_ids)``.
+
+    ``ended_member_runs`` is never stored on the team row itself, so a reloaded paused run starts without pre-pause
+    member rows. Hydrating it once from the session's stored child rows gives both live progress and final
+    ``TeamAttempt.metadata_content`` one deduplicated member set matching an in-memory ``continue_team``; paused
+    members being resumed keep their run ID so ``_MemberRuns._persist`` replaces them in place when they finish.
+    """
+    paused_member_ids = {member.run_id for member in persisted.member_responses}
+    by_id: dict[str, RunRecord] = {
+        row.run_id: row for row in session_runs if isinstance(row, RunRecord) and row.parent_run_id == persisted.run_id
+    }
+    for member in persisted.ended_member_runs:
+        by_id[member.run_id] = member
+    for member in persisted.member_responses:
+        by_id[member.run_id] = member
+    pre_pause_finished_ids = frozenset(run_id for run_id in by_id if run_id not in paused_member_ids)
+    return replace(persisted, ended_member_runs=list(by_id.values())), pre_pause_finished_ids
 
 
 @owned_tool_execution(
@@ -385,7 +389,7 @@ async def continue_paused_team_run(
     )
     try:
         set_consumption_storage(scope.storage_factory)
-        persisted = _stored_paused_team_run(scope, run_id)
+        persisted, pre_pause_finished_ids = _stored_paused_team_run(scope, run_id)
         decided = approval_decisions(approval_calls)
         tools = current_plugins(config, runtime_paths).tools
         async with asyncio.TaskGroup() as recovery:
@@ -487,13 +491,11 @@ async def continue_paused_team_run(
                 native,
             ),
             model_name=model_name,
-            on_usage_updated=_seed_team_resume_ai_run(
+            on_usage_updated=seed_team_resume_ai_run(
                 live_ai_run,
                 config=config,
                 model_name=model_name,
                 persisted=persisted,
-                storage=storage,
-                run_id=run_id,
                 subagent_cost=subagent_cost,
             ),
         )
@@ -523,9 +525,8 @@ async def continue_paused_team_run(
                         await publish_team_presentation(progress, presentation)
         continued = attempt.terminal_record()
         # Each resumed run's slot shows what the run hands over beyond its pause and its events did not show, such as
-        # a failed member run's reason; a run that paused again shows nothing more.
-        for run in (continued, *continued.ended_member_runs):
-            attempt.show_unshown_handover(run)
+        # a failed member run's reason; pre-pause finished members already rendered into the restored presentation.
+        _show_resumed_handovers(attempt, continued, pre_pause_finished_ids)
         paused = paused_attempt_from_response(continued, toolkit_owners=built.spec.tool_owners())
         if paused is not None:
             return continued_team_pause(presentation, paused, quiet=quiet)

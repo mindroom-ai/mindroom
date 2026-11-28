@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.reply_lifecycle import NoteKind
 from mindroom.streaming import (
@@ -107,6 +107,8 @@ class Presentation:
     trailing_note: Segment | None = None
     placeholder: str = AGENT_PLACEHOLDER
     show_tool_calls: bool = True
+    # Frozen provisional, status-less io.mindroom.ai_run payload last shown on this reply.
+    ai_run: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         """Keep the trailing note a note."""
@@ -227,7 +229,7 @@ def after_restart(possibly_shown: Presentation, *, config_change: bool = False) 
     """
     work = _shown_work(possibly_shown)
     if work is None:
-        return replace(possibly_shown, segments=(), trailing_note=None)
+        return replace(possibly_shown, segments=(), trailing_note=None, ai_run=None)
     return replace(possibly_shown, segments=(work, restart_note(config_change=config_change)), trailing_note=None)
 
 
@@ -323,6 +325,8 @@ def encode_presentation(presentation: Presentation) -> str:
     }
     if presentation.trailing_note is not None:
         encoded["trailing_note"] = _encode_segment(presentation.trailing_note)
+    if presentation.ai_run is not None:
+        encoded["ai_run"] = dict(presentation.ai_run)
     return json.dumps(encoded, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 
 
@@ -340,7 +344,13 @@ def decode_presentation(stored: str) -> Presentation:
     placeholder = data.get("placeholder")
     show_tool_calls = data.get("show_tool_calls")
     trailing = data.get("trailing_note")
-    if not isinstance(segments, list) or not isinstance(placeholder, str) or not isinstance(show_tool_calls, bool):
+    ai_run = data.get("ai_run")
+    if (
+        not isinstance(segments, list)
+        or not isinstance(placeholder, str)
+        or not isinstance(show_tool_calls, bool)
+        or (ai_run is not None and not isinstance(ai_run, dict))
+    ):
         msg = "Stored reply presentation is malformed"
         raise TypeError(msg)
     return Presentation(
@@ -348,4 +358,5 @@ def decode_presentation(stored: str) -> Presentation:
         trailing_note=_decode_segment(trailing) if trailing is not None else None,
         placeholder=placeholder,
         show_tool_calls=show_tool_calls,
+        ai_run=cast("dict[str, Any] | None", ai_run),
     )

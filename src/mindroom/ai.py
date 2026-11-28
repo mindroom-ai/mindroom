@@ -133,7 +133,6 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks, LoopState, TurnProgressHook
     from mindroom.agent_loop.spec import AgentSpec
-    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -147,6 +146,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.media_inputs import MediaInputs
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.response_turn import TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity

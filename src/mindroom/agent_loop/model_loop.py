@@ -13,6 +13,7 @@ a team leader's delegation does for a paused member.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +47,7 @@ from mindroom.llm.provider import (
     StreamTracker,
     TextDelta,
     TurnCompleted,
+    UsageReported,
     answering_identity,
 )
 from mindroom.llm.request_identity import cache_routing_digest, request_prefixes
@@ -150,8 +152,9 @@ class LoopHooks:
       they are appended, before the loop continues; a resumed batch that stops the run runs none. Its hooks return as
       ``after_tool_batch`` hooks do.
     - ``on_usage_updated``: called synchronously whenever the run's live usage, answering model, or recorded tool
-      calls change — after a completed turn is accepted, after a tool batch is recorded, and after a cut-off request's
-      usage is kept. Errors raised by this telemetry hook are logged and ignored so they never disrupt a run.
+      calls change — on mid-request ``UsageReported`` events (with a non-mutating projected state), after a completed
+      turn is accepted, after a tool batch is recorded, and after a cut-off request's usage is kept. Errors raised by
+      this telemetry hook are logged and ignored so they never disrupt a run.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
       request as sent, when any was (the skill review's capture).
     """
@@ -248,6 +251,14 @@ async def run_model_loop(
             messages,
             state.record,
             tracker,
+            on_usage=(
+                None
+                if hooks.on_usage_updated is None
+                else lambda active_tracker, received: _notify_usage_updated(
+                    hooks,
+                    _in_flight_state(state, active_tracker, received),
+                )
+            ),
             on_unaccepted=(None if hooks.on_usage_updated is None else lambda: _notify_usage_updated(hooks, state)),
         )
         async with closing_async_stream(events):
@@ -320,6 +331,35 @@ def _notify_usage_updated(hooks: LoopHooks, state: LoopState) -> None:
         hooks.on_usage_updated(state)
     except Exception:
         logger.warning("usage_progress_hook_failed", entity=_entity(state.record), exc_info=True)
+
+
+def _in_flight_state(state: LoopState, tracker: StreamTracker, received: MessageMetrics) -> LoopState:
+    """Return a non-mutating ``LoopState`` snapshot projecting one mid-request usage report."""
+    assert state.record.metrics is not None
+    projected_metrics = deepcopy(state.record.metrics)
+    for prior_identity, prior_metrics in tracker.prior_usage:
+        _count_request(projected_metrics, prior_metrics, prior_identity)
+    _count_request(projected_metrics, received, tracker.identity)
+    projected_record = replace(
+        state.record,
+        metrics=projected_metrics,
+        model=tracker.identity.id,
+        model_provider=tracker.identity.provider,
+        model_name=tracker.model_name if tracker.model_name is not None else state.record.model_name,
+    )
+    projected_messages = list(state.messages)
+    if not tracker.reported.sums_attempts:
+        projected_messages.append(
+            Message(
+                role="assistant",
+                metrics=received,
+                meta=MessageMeta(
+                    model=ModelProvenance(tracker.identity.id, tracker.identity.provider),
+                    aggregate_usage=False,
+                ),
+            ),
+        )
+    return replace(state, record=projected_record, messages=projected_messages)
 
 
 async def _after_turn(hooks: LoopHooks, state: LoopState, request: ModelRequest, message: Message) -> None:
@@ -565,6 +605,7 @@ async def _stream_turn(
     record: AnyRunRecord,
     tracker: StreamTracker,
     *,
+    on_usage: Callable[[StreamTracker, MessageMetrics], None] | None = None,
     on_unaccepted: Callable[[], None] | None = None,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
@@ -584,7 +625,10 @@ async def _stream_turn(
         async with closing_async_stream(stream):
             async for event in stream:
                 tracker.observe(event)
-                if isinstance(event, TextDelta):
+                if isinstance(event, UsageReported) and on_usage is not None:
+                    if (received := tracker.reported.received) is not None and received.reported:
+                        on_usage(tracker, received)
+                elif isinstance(event, TextDelta):
                     shown.append(event.text)
                     yield event
                 elif isinstance(event, ReasoningDelta):

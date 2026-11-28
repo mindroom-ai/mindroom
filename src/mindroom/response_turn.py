@@ -69,7 +69,6 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_modes import AgentMode
-    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import SubagentPersona
     from mindroom.dispatch_source import ScheduledHistoryBudget
@@ -86,6 +85,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.media_inputs import MediaInputs
     from mindroom.participation import ParticipationGate
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
@@ -1295,8 +1295,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 )
                 continuation = settle.continuation
                 keep_going = settle.keep_going
-                if keep_going and sinks.live_ai_run is not None:
-                    sinks.live_ai_run.clear_attempt_scope()
                 if not keep_going:
                     _record_completed_turn(sinks, run, resolution, settle)
                 if settle.response_text or settle.reports_nothing:

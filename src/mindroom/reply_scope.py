@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
-from mindroom.ai_run_metadata import ReplyAiRunProgress
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal.replies import (
     AppliedTransition,
@@ -36,6 +35,7 @@ from mindroom.final_delivery import Cancelled, Failed, FailureCause
 from mindroom.history.reply_compactions import ReplyCompactions
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
+from mindroom.reply_ai_run_progress import ReplyAiRunProgress
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     NoteKind,
@@ -192,7 +192,12 @@ class SpanHandle:
         """Return the whole reply as it would show with this span's answer so far."""
         answer = self._answer_segment(text, tool_trace, team_state=team_state)
         presentation = with_answer(self.base, answer) if answer.text.strip() or answer.tool_trace else self.base
-        return replace(presentation, trailing_note=trailing_note)
+        ai_run = self.ai_run_progress.payload(fallback_model=self.reply_model)
+        return replace(
+            presentation,
+            trailing_note=trailing_note,
+            ai_run=ai_run if ai_run is not None else presentation.ai_run,
+        )
 
 
 @dataclass

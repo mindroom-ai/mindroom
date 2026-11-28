@@ -67,7 +67,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
@@ -79,6 +78,7 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.media_inputs import MediaInputs
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.run_storage import RunStorage
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
@@ -600,7 +600,14 @@ class AgentApprovalExecution:
                             reusable_build=recovered.reusable_build,
                             resume=TurnResume(
                                 continuation_count=recovered.initial_continuation_count,
-                                prior_usage=prior_usage_by_run(persisted.metadata),
+                                prior_usage={
+                                    **prior_usage_by_run(persisted.metadata),
+                                    **(
+                                        {persisted.run_id: persisted.metrics}
+                                        if persisted.metrics is not None and persisted.metrics.reported
+                                        else {}
+                                    ),
+                                },
                             ),
                             delegation_depth=recovered.delegation_depth,
                             media=recovered.media,
