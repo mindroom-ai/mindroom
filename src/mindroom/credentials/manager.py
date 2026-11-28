@@ -27,8 +27,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from mindroom import runtime_env_policy as _runtime_env_policy
 from mindroom.atomic_file import atomic_write_bytes_at
+from mindroom.credentials.environment import declared_credentials
 from mindroom.credentials.legacy_env_credentials import remove_environment_copies
 from mindroom.credentials.policy import CredentialPlacement, CredentialServicePolicy, credential_service_policy
+from mindroom.credentials.service_names import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN, validate_service_name
 from mindroom.durable_write import create_directory_durable
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
@@ -47,10 +49,6 @@ if TYPE_CHECKING:
     from mindroom.credentials.environment import DeclaredCredential
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-# The characters a credential service name may contain. A config name that becomes part of one, such as a model
-# name in its dashboard key ``model:<name>``, follows the same rule.
-SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
-SERVICE_NAME_CHARACTERS = "letters, numbers, colon, underscore, and hyphen"
 _CREDENTIALS_FILE_SUFFIX = "_credentials.json"
 # Worker roots are mounted read-write into worker containers under the primary's own
 # uid, so each operation pins its credential directory with a no-follow descriptor and
@@ -123,18 +121,6 @@ class WorkerCredentialPathError(RuntimeError):
 
 class CredentialsUnreadableError(RuntimeError):
     """Raised when a saved credential document exists but cannot be read, for example under another key."""
-
-
-def validate_service_name(service: str) -> str:
-    """Validate and normalize credential service names."""
-    normalized = service.strip()
-    if not normalized:
-        msg = "Service name is required"
-        raise ValueError(msg)
-    if not SERVICE_NAME_PATTERN.fullmatch(normalized):
-        msg = f"Service name can only include {SERVICE_NAME_CHARACTERS}"
-        raise ValueError(msg)
-    return normalized
 
 
 def _scoped_credentials_dir_part(value: str) -> str:
@@ -823,9 +809,6 @@ def get_runtime_credentials_manager(runtime_paths: RuntimePaths) -> CredentialsM
         if manager is None:
             declared: Mapping[str, DeclaredCredential] = {}
             if key.declaring_env_digest is not None:
-                # The environment module validates service names with this module.
-                from mindroom.credentials.environment import declared_credentials  # noqa: PLC0415
-
                 declared = declared_credentials(runtime_paths)
             manager = CredentialsManager(
                 base_path=key.base_path,
