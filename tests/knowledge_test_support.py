@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.index_metadata import Publication
     from mindroom.knowledge.indexing_config import IndexingSettings
     from mindroom.knowledge.manager import KnowledgeManager
-    from mindroom.knowledge.refresh_runner import _RefreshChildResult
+    from mindroom.knowledge.refresh_runner import RefreshChildResult
     from mindroom.knowledge.registry import PublishedIndexKey
     from mindroom.knowledge.vector_store import KnowledgeCollection
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -167,7 +167,7 @@ async def run_refresh_child_in_process(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
-) -> _RefreshChildResult:
+) -> RefreshChildResult:
     """Run the refresh child's job in this process, reporting an exception as the child's entry point does."""
     try:
         return await _refresh_knowledge_binding(

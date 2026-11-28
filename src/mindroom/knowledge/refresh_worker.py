@@ -23,11 +23,11 @@ from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
 from mindroom.knowledge.refresh_runner import (
-    _child_result_adapter,
-    _github_app_refresh_binding,
-    _RefreshChildResult,
-    _SubprocessGitHubAppToken,
-    _SubprocessRefreshRequest,
+    RefreshChildResult,
+    SubprocessGitHubAppToken,
+    SubprocessRefreshRequest,
+    child_result_adapter,
+    github_app_refresh_binding,
 )
 from mindroom.knowledge.registry import (
     record_refresh_succeeded,
@@ -68,7 +68,7 @@ async def _refresh_knowledge_binding(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
     force_reindex: bool = False,
-) -> _RefreshChildResult:
+) -> RefreshChildResult:
     """Refresh one resolved knowledge binding under its source-root lock: the refresh child's whole job."""
     key = resolve_published_index_key(
         base_id,
@@ -80,7 +80,7 @@ async def _refresh_knowledge_binding(
     async with refresh_source_root_lock(source_root_for_published_index_key(key)):
         manager = _knowledge_manager(key, config=config, runtime_paths=runtime_paths)
         outcome = await manager.refresh(force_reindex=force_reindex)
-    return _RefreshChildResult(
+    return RefreshChildResult(
         indexed_count=outcome.indexed_count,
         published=outcome.published,
         error=outcome.error,
@@ -147,7 +147,7 @@ def _load_subprocess_github_app_binding(raw_binding_payload: object) -> GitHubAp
     )
 
 
-def _load_subprocess_github_app_token(raw_token_payload: object) -> _SubprocessGitHubAppToken | None:
+def _load_subprocess_github_app_token(raw_token_payload: object) -> SubprocessGitHubAppToken | None:
     if raw_token_payload is None:
         return None
     if not isinstance(raw_token_payload, dict):
@@ -162,14 +162,14 @@ def _load_subprocess_github_app_token(raw_token_payload: object) -> _SubprocessG
     if not isinstance(raw_expires_at_epoch, int) or isinstance(raw_expires_at_epoch, bool) or raw_expires_at_epoch <= 0:
         msg = "Knowledge refresh subprocess request github_app_token.expires_at_epoch must be positive"
         raise TypeError(msg)
-    return _SubprocessGitHubAppToken(
+    return SubprocessGitHubAppToken(
         token=raw_token,
         expires_at_epoch=raw_expires_at_epoch,
         binding=_load_subprocess_github_app_binding(token_payload.get("binding")),
     )
 
 
-def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshRequest:
+def _load_subprocess_refresh_request(payload: bytes) -> SubprocessRefreshRequest:
     raw_payload = json.loads(payload.decode())
     if not isinstance(raw_payload, dict):
         msg = "Knowledge refresh subprocess request must be a JSON object"
@@ -199,7 +199,7 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
     if raw_execution_identity is not None and not isinstance(raw_execution_identity, dict):
         msg = "Knowledge refresh subprocess request execution_identity must be an object when present"
         raise TypeError(msg)
-    return _SubprocessRefreshRequest(
+    return SubprocessRefreshRequest(
         base_id=raw_base_id,
         config_data=raw_config_data,
         config_path=raw_config_path,
@@ -212,14 +212,14 @@ def _load_subprocess_refresh_request(payload: bytes) -> _SubprocessRefreshReques
 
 
 async def _prime_subprocess_github_app_token(
-    request: _SubprocessRefreshRequest,
+    request: SubprocessRefreshRequest,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> None:
     if request.github_app_token is None:
         return
-    binding = await _github_app_refresh_binding(
+    binding = await github_app_refresh_binding(
         request.base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -243,7 +243,7 @@ async def _prime_subprocess_github_app_token(
     )
 
 
-async def _run_subprocess_refresh_request(payload: bytes) -> _RefreshChildResult:
+async def _run_subprocess_refresh_request(payload: bytes) -> RefreshChildResult:
     request = _load_subprocess_refresh_request(payload)
     runtime_paths = resolve_runtime_paths(
         config_path=Path(request.config_path),
@@ -276,12 +276,12 @@ async def _run_subprocess_refresh_request(payload: bytes) -> _RefreshChildResult
     )
 
 
-def _failed_child_result(error: Exception) -> _RefreshChildResult:
+def _failed_child_result(error: Exception) -> RefreshChildResult:
     """Return what a refresh child reports for an error it did not handle, credential-redacted."""
-    return _RefreshChildResult(error=redact_credentials_in_text(str(error)) or type(error).__name__)
+    return RefreshChildResult(error=redact_credentials_in_text(str(error)) or type(error).__name__)
 
 
-def _run_child_request(payload: bytes) -> _RefreshChildResult:
+def _run_child_request(payload: bytes) -> RefreshChildResult:
     """Run one refresh request and report its result, or its error, with the oversized files it skipped."""
     # `asyncio.run` copies this context, so the refresh adds to this same collection.
     with collected_oversized_files() as oversized_files:
@@ -308,5 +308,5 @@ def main(argv: list[str] | None = None) -> int:
             published=result.published,
             error=result.error is not None,
         )
-        output.write(_child_result_adapter.dump_json(result))
+        output.write(child_result_adapter.dump_json(result))
     return 0

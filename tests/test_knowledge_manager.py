@@ -115,9 +115,9 @@ from mindroom.knowledge.redaction import (
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import (
     KnowledgeRefreshResult,
+    RefreshChildResult,
     _record_child_result,
     _RefreshChildFailedError,
-    _RefreshChildResult,
     knowledge_binding_mutation_lock,
 )
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess as refresh_knowledge_binding
@@ -1173,7 +1173,7 @@ async def test_file_mode_refresh_cancelled_after_its_publication_records_success
     async def _publish_then_hang(
         key: knowledge_registry.PublishedIndexKey,
         **kwargs: object,
-    ) -> _RefreshChildResult:
+    ) -> RefreshChildResult:
         await run_refresh_child_in_process(key, **kwargs)
         published.set()
         await asyncio.Event().wait()
@@ -1335,7 +1335,7 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
     refresh_started = asyncio.Event()
     release_refresh = asyncio.Event()
 
-    async def held_refresh(key: knowledge_registry.PublishedIndexKey, **kwargs: object) -> _RefreshChildResult:
+    async def held_refresh(key: knowledge_registry.PublishedIndexKey, **kwargs: object) -> RefreshChildResult:
         # The refresh stays in flight until the read below returns, so that read cannot see its publication.
         refresh_started.set()
         await release_refresh.wait()
@@ -4125,7 +4125,7 @@ async def test_the_refresh_child_publishes_without_touching_the_refresh_status(t
     child_result = await run_refresh_child("docs", config=config, runtime_paths=runtime_paths)
 
     # A first build compares no corpus, so it reports no source change to the base's aliases.
-    assert child_result == _RefreshChildResult(indexed_count=1, published=True)
+    assert child_result == RefreshChildResult(indexed_count=1, published=True)
     assert status_file.read_bytes() == status_bytes
     publication = load_publication(storage)
     assert publication is not None
@@ -5795,8 +5795,8 @@ async def test_refresh_scheduler_probes_embedder_after_persisted_refresh_failure
     scheduler = KnowledgeRefreshScheduler()
     probe_reasons: list[str] = []
 
-    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> _RefreshChildResult:
-        return _RefreshChildResult(
+    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> RefreshChildResult:
+        return RefreshChildResult(
             error="Indexed 0 of 3 managed knowledge files (first error: embedder authentication failed (HTTP 401))",
         )
 
@@ -5874,9 +5874,9 @@ async def test_refresh_scheduler_does_not_probe_after_successful_refresh(
     scheduler = KnowledgeRefreshScheduler()
     refreshed = asyncio.Event()
 
-    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> _RefreshChildResult:
+    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> RefreshChildResult:
         refreshed.set()
-        return _RefreshChildResult(published=True)
+        return RefreshChildResult(published=True)
 
     async def _fake_check(
         _config: Config,
@@ -5914,8 +5914,8 @@ async def test_successful_subprocess_refresh_probes_to_clear_stale_health(
     probe_reasons: list[str] = []
     embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
 
-    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> _RefreshChildResult:
-        return _RefreshChildResult(published=True)
+    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> RefreshChildResult:
+        return RefreshChildResult(published=True)
 
     async def _fake_check(
         _config: Config,
@@ -5959,10 +5959,10 @@ async def test_refresh_scheduled_before_reload_cannot_probe_old_config(
     release = asyncio.Event()
     probe_reasons: list[str] = []
 
-    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> _RefreshChildResult:
+    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **_kwargs: object) -> RefreshChildResult:
         started.set()
         await release.wait()
-        return _RefreshChildResult(published=True)
+        return RefreshChildResult(published=True)
 
     async def _fake_check(
         _config: Config,
@@ -6066,7 +6066,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
     release_first = asyncio.Event()
     second_started = asyncio.Event()
 
-    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **kwargs: object) -> _RefreshChildResult:
+    async def _fake_refresh(_key: knowledge_registry.PublishedIndexKey, **kwargs: object) -> RefreshChildResult:
         refresh_config = kwargs["config"]
         assert isinstance(refresh_config, Config)
         seen_chunk_sizes.append(refresh_config.knowledge_bases["docs"].chunk_size)
@@ -6075,7 +6075,7 @@ async def test_refresh_scheduler_coalesces_duplicate_schedule_while_active(
             await release_first.wait()
         else:
             second_started.set()
-        return _RefreshChildResult()
+        return RefreshChildResult()
 
     monkeypatch.setattr(knowledge_refresh_runner, "_run_refresh_child", _fake_refresh)
 
@@ -6426,21 +6426,21 @@ async def test_subprocess_refresh_primes_parent_github_app_token(
         config: Config,
         runtime_paths: RuntimePaths,
         **_kwargs: object,
-    ) -> _RefreshChildResult:
+    ) -> RefreshChildResult:
         manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
         resolved = await manager.git_source._github_app_token_provider.resolve(
             git_config.repo_url,
             credentials,
         )
         assert resolved == ("x-access-token", "parent-cached-token")
-        return _RefreshChildResult(published=True)
+        return RefreshChildResult(published=True)
 
     monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
     monkeypatch.setattr(knowledge_refresh_worker, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_worker._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
 
-    assert result == _RefreshChildResult(published=True)
+    assert result == RefreshChildResult(published=True)
     assert mint_count == 0
 
 
@@ -6521,21 +6521,21 @@ async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
         config: Config,
         runtime_paths: RuntimePaths,
         **_kwargs: object,
-    ) -> _RefreshChildResult:
+    ) -> RefreshChildResult:
         manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
         resolved = await manager.git_source._github_app_token_provider.resolve(
             git_config.repo_url,
             current_credentials,
         )
         assert resolved == ("x-access-token", "current-token")
-        return _RefreshChildResult(published=True)
+        return RefreshChildResult(published=True)
 
     monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
     monkeypatch.setattr(knowledge_refresh_worker, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_worker._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
 
-    assert result == _RefreshChildResult(published=True)
+    assert result == RefreshChildResult(published=True)
     assert mint_count == 1
 
 
@@ -6574,17 +6574,17 @@ async def test_subprocess_applies_runtime_knowledge_base_after_authored_validati
     assert set(raw_payload["config_data"]["knowledge_bases"]) == {"threads"}
     assert raw_payload["runtime_knowledge_base"]["path"] == str(workspace)
 
-    async def _fake_refresh(refresh_base_id: str, *, config: Config, **_kwargs: object) -> _RefreshChildResult:
+    async def _fake_refresh(refresh_base_id: str, *, config: Config, **_kwargs: object) -> RefreshChildResult:
         assert refresh_base_id == base_id
         assert set(config.knowledge_bases) == {"threads", base_id}
         assert config.knowledge_bases[base_id] == runtime_base
-        return _RefreshChildResult(published=True)
+        return RefreshChildResult(published=True)
 
     monkeypatch.setattr(knowledge_refresh_worker, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_worker._run_subprocess_refresh_request(payload)
 
-    assert result == _RefreshChildResult(published=True)
+    assert result == RefreshChildResult(published=True)
 
 
 @pytest.mark.asyncio
@@ -9871,7 +9871,7 @@ def test_a_failed_refresh_child_still_reports_its_oversized_files(
         huge.truncate(65 << 20)
     config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
 
-    async def _list_then_fail(_payload: bytes) -> _RefreshChildResult:
+    async def _list_then_fail(_payload: bytes) -> RefreshChildResult:
         await asyncio.to_thread(list_knowledge_files, config, "docs", docs)
         msg = "No space left on device"
         raise OSError(msg)
@@ -10035,7 +10035,7 @@ def test_a_deferred_cold_refresh_marks_the_source_empty(tmp_path: Path) -> None:
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
-    _record_child_result(key, _RefreshChildResult(deferred=True), 0)
+    _record_child_result(key, RefreshChildResult(deferred=True), 0)
     assert load_refresh_status(published_index_storage_path(key)).reason == "source_empty"
 
 

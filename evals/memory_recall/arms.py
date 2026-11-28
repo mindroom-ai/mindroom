@@ -419,7 +419,7 @@ async def _indexed_knowledge(
             target.write_bytes(content)
     file_memory = _file_memory(root, config, arm)
     if not ready:
-        # The refresh child's path (`refresh_runner._knowledge_manager`), run in this process.
+        # The refresh child's path (`refresh_worker._knowledge_manager`), run in this process.
         binding = resolve_knowledge_binding(
             file_memory.base_id,
             file_memory.config,

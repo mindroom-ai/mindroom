@@ -93,14 +93,14 @@ class KnowledgeRefreshResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _RefreshChildResult(RefreshOutcome):
+class RefreshChildResult(RefreshOutcome):
     """What one refresh child did, reported to the runtime that started it."""
 
     #: The files above the read cap this refresh skipped, for the runtime to warn about once.
     oversized_files: tuple[OversizedKnowledgeFile, ...] = ()
 
 
-_child_result_adapter = TypeAdapter(_RefreshChildResult)
+child_result_adapter = TypeAdapter(RefreshChildResult)
 
 
 class _RefreshChildFailedError(RuntimeError):
@@ -113,21 +113,25 @@ class _RefreshChildFailedError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class _SubprocessGitHubAppToken:
+class SubprocessGitHubAppToken:
+    """A parent-minted token and its binding, passed to the refresh child."""
+
     token: str = field(repr=False)
     expires_at_epoch: int
     binding: GitHubAppTokenBinding
 
 
 @dataclass(frozen=True)
-class _SubprocessRefreshRequest:
+class SubprocessRefreshRequest:
+    """The request the runtime sends to a refresh subprocess."""
+
     base_id: str
     config_data: dict[str, object]
     config_path: str
     storage_root: str
     runtime_knowledge_base: dict[str, object] | None = None
     execution_identity: SerializedToolExecutionIdentity | None = None
-    github_app_token: _SubprocessGitHubAppToken | None = None
+    github_app_token: SubprocessGitHubAppToken | None = None
     force_reindex: bool = False
 
 
@@ -164,12 +168,13 @@ _REFRESH_SUBPROCESS_THREAD_ENV = {
 }
 
 
-async def _github_app_refresh_binding(
+async def github_app_refresh_binding(
     base_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, dict[str, Any]] | None:
+    """Return the base's Git remote and GitHub App credentials, if configured."""
     git_config = config.get_knowledge_base_config(base_id).git
     if git_config is None or git_config.credentials_service is None:
         return None
@@ -191,8 +196,8 @@ async def _resolve_subprocess_github_app_token(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> _SubprocessGitHubAppToken | None:
-    binding = await _github_app_refresh_binding(
+) -> SubprocessGitHubAppToken | None:
+    binding = await github_app_refresh_binding(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -202,7 +207,7 @@ async def _resolve_subprocess_github_app_token(
     repo_url, credentials = binding
     provider = get_runtime_github_app_token_provider()
     resolved = await provider.resolve_token(repo_url, credentials)
-    return _SubprocessGitHubAppToken(
+    return SubprocessGitHubAppToken(
         token=resolved.token,
         expires_at_epoch=int(resolved.expires_at.timestamp()),
         binding=provider.binding_for(repo_url, credentials),
@@ -295,7 +300,7 @@ async def refresh_knowledge_binding_in_subprocess(
     )
 
 
-def _record_child_result(key: PublishedIndexKey, result: _RefreshChildResult, reason_generation: int) -> None:
+def _record_child_result(key: PublishedIndexKey, result: RefreshChildResult, reason_generation: int) -> None:
     if result.published:
         record_refresh_succeeded(key, reason_generation=reason_generation)
     elif result.deferred:
@@ -363,7 +368,7 @@ async def _run_refresh_child(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     force_reindex: bool,
-) -> _RefreshChildResult:
+) -> RefreshChildResult:
     """Run the child and return what it reported; raise ``_RefreshChildFailedError`` when it reported nothing."""
     base_id = key.base_id
     # A file avoids pipe backpressure or waiting for EOF from a Git helper
@@ -428,7 +433,7 @@ async def _run_refresh_child(
         if return_code != 0 or not reported:
             msg = f"Knowledge refresh subprocess failed for {base_id!r} with exit code {return_code}"
             raise _RefreshChildFailedError(msg, started=True)
-        return _child_result_adapter.validate_json(reported)
+        return child_result_adapter.validate_json(reported)
 
 
 def _serialize_subprocess_refresh_request(
@@ -437,11 +442,11 @@ def _serialize_subprocess_refresh_request(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    github_app_token: _SubprocessGitHubAppToken | None = None,
+    github_app_token: SubprocessGitHubAppToken | None = None,
     force_reindex: bool,
 ) -> bytes:
     runtime_knowledge_base = config.runtime_knowledge_base_overlay(base_id)
-    payload = _SubprocessRefreshRequest(
+    payload = SubprocessRefreshRequest(
         base_id=base_id,
         config_data=config.authored_model_dump(),
         config_path=str(runtime_paths.config_path),
