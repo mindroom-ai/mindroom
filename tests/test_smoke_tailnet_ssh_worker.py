@@ -17,7 +17,7 @@ from cluster.k8s.kind import smoke_tailnet_ssh_worker as smoke
 from cluster.k8s.kind import tailnet_ssh_gateway_stand_in as stand_in
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 _KUBECTL = ["kubectl", "--context", "kind-test"]
 _PRIMARY = {
@@ -257,9 +257,16 @@ def _serve_once(answer: bytes) -> tuple[int, Callable[[], bytes]]:
     return server.getsockname()[1], sent
 
 
-def _unused_port() -> int:
-    with socket.create_server(("127.0.0.1", 0)) as server:
-        return server.getsockname()[1]
+@contextlib.contextmanager
+def _refusing_port() -> Iterator[int]:
+    """Reserve a loopback port that refuses connections until the context exits.
+
+    Binding without ``listen()`` keeps the port reserved against concurrent binds
+    and ephemeral self-connects while the kernel rejects ``connect()`` with ``RST``.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        yield sock.getsockname()[1]
 
 
 def test_the_stand_in_sends_the_primary_what_the_worker_sent_first(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,11 +282,12 @@ def test_the_stand_in_sends_the_primary_what_the_worker_sent_first(monkeypatch: 
 
 def test_the_stand_in_raises_when_it_cannot_reach_the_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """A worker port that never answers fails the stand-in rather than returning a banner."""
-    primary_port, told = _serve_once(f"127.0.0.1 {_unused_port()}\n".encode())
-    monkeypatch.setenv("TAILNET_SSH_PRIMARY_URL", f"http://127.0.0.1:{primary_port}")
+    with _refusing_port() as worker_port:
+        primary_port, told = _serve_once(f"127.0.0.1 {worker_port}\n".encode())
+        monkeypatch.setenv("TAILNET_SSH_PRIMARY_URL", f"http://127.0.0.1:{primary_port}")
 
-    with pytest.raises(ConnectionRefusedError):
-        stand_in.main()
+        with pytest.raises(ConnectionRefusedError):
+            stand_in.main()
 
     assert told() == b""
 
