@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import bisect
 import difflib
+import fnmatch
 import itertools
 import json
 import os
@@ -721,14 +722,7 @@ def _format_find_results(matched: Iterable[Path], base_dir: Path, pattern: str, 
 
 def _split_ripgrep_find_pattern(search_path: Path, pattern: str) -> tuple[Path, tuple[str, ...]] | None:
     """Split ``literal/**/<rest>`` into ``(effective_root, rest)``, or ``None`` for Python glob."""
-    # Python 3.13's PurePath.full_match lets negated classes ([!...]) match '/', so fall back to Path.glob.
-    if (
-        not search_path.is_dir()
-        or not pattern
-        or "\x00" in pattern
-        or "[!" in pattern
-        or pattern.endswith(("/", os.sep))
-    ):
+    if not search_path.is_dir() or not pattern or "\x00" in pattern or pattern.endswith(("/", os.sep)):
         return None
     parts = Path(pattern).parts
     if not parts or ".." in parts:
@@ -740,7 +734,7 @@ def _split_ripgrep_find_pattern(search_path: Path, pattern: str) -> tuple[Path, 
 
 def _run_ripgrep_files(rg_binary: str, root: Path) -> bytes | str | None:
     """Run ``rg --files --null`` in ``root``; return raw stdout, a timeout error, or ``None`` to fall back."""
-    args = [rg_binary, "--no-config", "--no-ignore-dot", "--no-ignore-global", "--files", "--null"]
+    args = [str(Path(rg_binary).resolve()), "--no-config", "--no-ignore-dot", "--no-ignore-global", "--files", "--null"]
     try:
         proc = subprocess.run(args, cwd=root, check=False, capture_output=True, timeout=_GREP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
@@ -750,10 +744,30 @@ def _run_ripgrep_files(rg_binary: str, root: Path) -> bytes | str | None:
     return b"" if proc.returncode == 1 else (proc.stdout if proc.returncode in (0, 2) else None)
 
 
-def _match_ripgrep_files(stdout: bytes, effective_root: Path, sub_pattern: str, pattern: str) -> list[Path] | str:
-    """Filter NUL-delimited relative paths from ripgrep with ``PurePath.full_match``."""
+def _parts_match(parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
+    """Match path components against glob components, with ``**`` matching zero or more components."""
+    p_idx = g_idx = 0
+    star_g = star_p = -1
+    while p_idx < len(parts):
+        if g_idx < len(pattern_parts) and pattern_parts[g_idx] == "**":
+            star_g, star_p = g_idx, p_idx
+            g_idx += 1
+        elif g_idx < len(pattern_parts) and fnmatch.fnmatch(parts[p_idx], pattern_parts[g_idx]):
+            p_idx += 1
+            g_idx += 1
+        elif star_g != -1:
+            star_p += 1
+            p_idx, g_idx = star_p, star_g + 1
+        else:
+            return False
+    while g_idx < len(pattern_parts) and pattern_parts[g_idx] == "**":
+        g_idx += 1
+    return g_idx == len(pattern_parts)
+
+
+def _match_ripgrep_files(stdout: bytes, effective_root: Path, rest: tuple[str, ...]) -> list[Path]:
+    """Filter NUL-delimited relative paths from ripgrep component-by-component."""
     matched: list[Path] = []
-    sub_glob = PurePath(sub_pattern)
     for raw_entry in stdout.split(b"\0"):
         if not raw_entry:
             continue
@@ -761,11 +775,7 @@ def _match_ripgrep_files(stdout: bytes, effective_root: Path, sub_pattern: str, 
         # startswith(".") excludes dotfiles, dot-directories (e.g. !.env.example), and "..".
         if not rel_path.parts or rel_path.is_absolute() or any(part.startswith(".") for part in rel_path.parts):
             continue
-        try:
-            is_match = rel_path.full_match(sub_glob)
-        except (NotImplementedError, ValueError) as e:
-            return f"Error: Invalid glob pattern '{pattern}': {e}"
-        if is_match:
+        if _parts_match(rel_path.parts, rest):
             matched.append(effective_root / rel_path)
     matched.sort()
     return matched
@@ -803,8 +813,7 @@ def _find_files_ripgrep(
         return raw
     if not is_within_base_dir(effective_root, filter_root):
         return no_matches
-    matched = _match_ripgrep_files(raw, effective_root, "/".join(rest), pattern)
-    return matched if isinstance(matched, str) else _format_find_results(matched, base_dir, pattern, limit)
+    return _format_find_results(_match_ripgrep_files(raw, effective_root, rest), base_dir, pattern, limit)
 
 
 def _find_files_python(

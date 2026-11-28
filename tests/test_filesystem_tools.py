@@ -2028,6 +2028,7 @@ class TestFindFiles:
         assert "src/app/util.ts" in self._assert_find_parity(tools, monkeypatch, "**")
         assert self._assert_find_parity(tools, monkeypatch, "**/[!0-9].py") == "^.py\na.py"
         assert self._assert_find_parity(tools, monkeypatch, "docs/**/*[!a-z]*.md") == "docs/architecture/foo_1.md"
+        assert self._assert_find_parity(tools, monkeypatch, "docs/**/*[.-_]*.md") == "docs/architecture/foo_1.md"
         assert self._assert_find_parity(tools, monkeypatch, "**/[^0-9].py") == "1.py\n^.py"
         assert self._assert_find_parity(tools, monkeypatch, "**/{a,b}.py") == "{a,b}.py"
         assert self._assert_find_parity(tools, monkeypatch, "hello.py") == "hello.py"
@@ -2178,6 +2179,11 @@ class TestFindFiles:
         assert self._assert_find_parity(tools, monkeypatch, "*.md") == "AGENTS.md\nCLAUDE.md"
         assert self._assert_find_parity(tools, monkeypatch, "test_gmail*.py") == "test_gmail_tools.py"
 
+        # Negated classes inside recursive globs still use ripgrep traversal (not Python fallback).
+        _use_ripgrep(monkeypatch, ripgrep=True)
+        assert tools.find_files("**/[!x]*.md") == "AGENTS.md\nreal_docs/guide.md\nskills_src/deep/SKILL.md"
+        assert tools.find_files("**/[!_]*gmail_tools.py") == "No files matching '**/[!_]*gmail_tools.py' found."
+
     def test_find_ripgrep_confinement_exit_codes_and_workspace_swap(
         self,
         tmp_path: Path,
@@ -2212,6 +2218,19 @@ class TestFindFiles:
         assert tools.find_files("**/*.txt") == "shared/deep/match.txt"
         fake_rg.write_text("#!/bin/sh\nexit 3\n")
         assert tools.find_files("**/*.txt") == "shared/deep/match.txt"
+
+        # A relative rg path from PATH resolves in the primary's cwd, never inside the searched workspace.
+        primary_cwd = tmp_path / "primary_cwd"
+        (primary_cwd / "relbin").mkdir(parents=True)
+        (primary_rg := primary_cwd / "relbin" / "rg").write_text("#!/bin/sh\nprintf 'shared/deep/match.txt\\0'\n")
+        primary_rg.chmod(0o755)
+        (workspace / "relbin").mkdir()
+        (planted_rg := workspace / "relbin" / "rg").write_text("#!/bin/sh\nprintf 'PLANTED_RAN\\0'\n")
+        planted_rg.chmod(0o755)
+        with monkeypatch.context() as rel_patch:
+            rel_patch.chdir(primary_cwd)
+            rel_patch.setattr(filesystem_module.shutil, "which", lambda _name: "relbin/rg")
+            assert tools.find_files("**/*.txt") == "shared/deep/match.txt"
 
         # Workspace replaced by symlink during rg execution is rejected by post-flight confinement; pre-call returns Error.
         moved = tmp_path / "moved"
