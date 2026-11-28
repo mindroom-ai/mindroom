@@ -589,7 +589,7 @@ def _is_git_repo(base_dir: Path) -> bool:
     return any((parent / ".git").exists() for parent in (current, *current.parents))
 
 
-def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
+def _gitignored_paths(paths: list[Path], base_dir: Path, *, no_index: bool = False) -> set[Path]:
     """Return the subset of paths ignored by git using a single batched call."""
     if not paths or not _is_git_repo(base_dir):
         return set()
@@ -607,9 +607,10 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
         path_map.setdefault(token, []).append(candidate)
 
     payload = "\0".join(path_map.keys()) + "\0"
+    args = ["check-ignore", "--stdin", "-z", *(["--no-index"] if no_index else [])]
     try:
         result = subprocess.run(
-            hardened_git_command(["check-ignore", "--stdin", "-z"]),
+            hardened_git_command(args),
             check=False,
             cwd=str(base_dir),
             env=hardened_git_env(),
@@ -720,7 +721,14 @@ def _format_find_results(matched: Iterable[Path], base_dir: Path, pattern: str, 
 
 def _split_ripgrep_find_pattern(search_path: Path, pattern: str) -> tuple[Path, tuple[str, ...]] | None:
     """Split ``literal/**/<rest>`` into ``(effective_root, rest)``, or ``None`` for Python glob."""
-    if not search_path.is_dir() or not pattern or "\x00" in pattern or pattern.endswith(("/", os.sep)):
+    # Python 3.13's PurePath.full_match lets negated classes ([!...]) match '/', so fall back to Path.glob.
+    if (
+        not search_path.is_dir()
+        or not pattern
+        or "\x00" in pattern
+        or "[!" in pattern
+        or pattern.endswith(("/", os.sep))
+    ):
         return None
     parts = Path(pattern).parts
     if not parts or ".." in parts:
@@ -784,7 +792,10 @@ def _find_files_ripgrep(
     if (
         not effective_root.is_dir()
         or not is_within_base_dir(effective_root, filter_root)
-        or (not (effective_root / ".git").exists() and _gitignored_paths([effective_root], effective_root))
+        or (
+            not (effective_root / ".git").exists()
+            and _gitignored_paths([effective_root], effective_root, no_index=True)
+        )
     ):
         return no_matches
     raw = _run_ripgrep_files(rg_binary, effective_root)

@@ -2016,6 +2016,8 @@ class TestFindFiles:
             "src/a.tsx",
             "src/app/index.tsx",
             "src/app/util.ts",
+            "docs/architecture/compaction.md",
+            "docs/architecture/foo_1.md",
         ):
             (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
             (tmp_path / rel).write_text("x")
@@ -2025,6 +2027,7 @@ class TestFindFiles:
         assert self._assert_find_parity(tools, monkeypatch, "src/**/*.tsx") == "src/a.tsx\nsrc/app/index.tsx"
         assert "src/app/util.ts" in self._assert_find_parity(tools, monkeypatch, "**")
         assert self._assert_find_parity(tools, monkeypatch, "**/[!0-9].py") == "^.py\na.py"
+        assert self._assert_find_parity(tools, monkeypatch, "docs/**/*[!a-z]*.md") == "docs/architecture/foo_1.md"
         assert self._assert_find_parity(tools, monkeypatch, "**/[^0-9].py") == "1.py\n^.py"
         assert self._assert_find_parity(tools, monkeypatch, "**/{a,b}.py") == "{a,b}.py"
         assert self._assert_find_parity(tools, monkeypatch, "hello.py") == "hello.py"
@@ -2080,6 +2083,16 @@ class TestFindFiles:
         expected_md = ".mindroom/runs/r1/memory/people.md"
         assert self._assert_find_parity(tools, monkeypatch, "**/*.md", path=".mindroom/runs") == expected_md
         assert self._assert_find_parity(tools, monkeypatch, ".mindroom/runs/**/*.md") == expected_md
+
+        # An ignored directory holding a force-tracked file must still be treated as ignored by the ripgrep root check.
+        (repo / "generated").mkdir()
+        (repo / "generated" / "manifest.json").write_text("{}")
+        (repo / "generated" / "out.py").write_text("x")
+        (repo / ".gitignore").write_text((repo / ".gitignore").read_text() + "generated/\n")
+        subprocess.run(["git", "add", "-f", "generated/manifest.json"], cwd=repo, check=True)
+        _use_ripgrep(monkeypatch, ripgrep=True)
+        assert tools.find_files("generated/**/*.py") == "No files matching 'generated/**/*.py' found."
+        assert tools.find_files("**/*.py", path="generated") == "No files matching '**/*.py' found."
 
     def test_find_ripgrep_nested_repos_and_submodules(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Ripgrep traverses submodules and nested clones while respecting their .gitignore files and hiding dotfiles."""
