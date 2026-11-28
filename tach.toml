@@ -7619,8 +7619,8 @@ depends_on = [
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_locks",
+    "mindroom.knowledge.refresh_outcome",
     "mindroom.knowledge.registry",
-    "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
 ]
 

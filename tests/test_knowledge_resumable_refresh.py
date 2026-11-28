@@ -871,10 +871,11 @@ async def test_a_file_changed_after_the_adopted_scan_is_still_indexed(
     config = _config(tmp_path, docs_path)
     await _manager(config).reindex_all()
     manager = _manager(config)
-    await manager.source_signature()
+    assert not hasattr(manager, "_source_scan")
+    _signature, stale_scan = await manager._scan_source()
     (docs_path / names[1]).write_text("late body", encoding="utf-8")
 
-    assert (await manager.reindex_all()).published
+    assert (await manager.reindex_all(initial_scan=stale_scan)).published
     assert embedder.embedded_count("late body") == 1
     publication = _publication(config)
     assert publication is not None
