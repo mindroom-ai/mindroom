@@ -25,6 +25,7 @@ from dataclasses import astuple, dataclass, fields, replace
 from datetime import UTC, datetime
 from time import time
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from uuid import uuid4
 
 from mindroom.constants import (
     MATRIX_EVENT_ID_METADATA_KEY,
@@ -36,8 +37,9 @@ from mindroom.constants import (
 )
 from mindroom.delegation.cost import receipts_metadata, stored_receipts, subagent_cost_metadata
 from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, ModelProvenance
 from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.schema import (
@@ -55,8 +57,9 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
+    from mindroom.llm.provider import ModelIdentity
     from mindroom.llm.runs import AnyRunRecord, RunRecord
-    from mindroom.llm.usage import HelperUsage
+    from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.types import SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
@@ -493,6 +496,41 @@ class ConversationStore:
             connection.execute(usage_upsert_sql(self.names), (session_id, usage_id, json.dumps(snapshot)))
         if created is not None:
             report_created_row(created)
+
+
+def save_compaction_usage(
+    store: ConversationStore,
+    *,
+    session_id: str,
+    requester_id: str | None,
+    model: ModelIdentity,
+    usage: MessageMetrics,
+    initial_session: ConversationSession | None,
+) -> None:
+    """Persist one summary response's returned counters, with the model that answered it, apart from the conversation."""
+    created_at = time()
+    summary = HelperUsage(
+        run_id=str(uuid4()),
+        model=model.id,
+        provider=model.provider,
+        metrics=RunMetrics(tokens=usage.tokens),
+        requests=(
+            RequestUsage(
+                created_at=created_at,
+                metrics=usage,
+                model=ModelProvenance(model_id=model.id, provider=model.provider),
+            ),
+        ),
+        created_at=created_at,
+    )
+    store.save_independent_usage(
+        session_id=session_id,
+        usage_id=f"compaction:{summary.run_id}",
+        kind="compaction_summary",
+        requester_id=requester_id,
+        initial_session=initial_session,
+        usage=summary,
+    )
 
 
 class LoggedRun(NamedTuple):
@@ -1303,6 +1341,7 @@ __all__ = [
     "persist_to",
     "report_created_row",
     "runs_without",
+    "save_compaction_usage",
     "seen_event_ids",
     "set_visible_messages",
     "source_event_ids",

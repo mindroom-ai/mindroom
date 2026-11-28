@@ -30,6 +30,7 @@ from mindroom.embeddings.errors import (
     is_embedder_auth_failure_detail,
 )
 from mindroom.embeddings.factory import create_configured_embedder
+from mindroom.embeddings.health_state import reset_embedder_health_generation
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
@@ -499,7 +500,7 @@ async def test_stale_probe_result_is_discarded_after_generation_bump(
         _recorder: embedder_health.EmbedderHealthRecorder,
     ) -> str:
         # A reload lands while this probe is still in flight.
-        embedder_health._reset_embedder_health_generation()
+        reset_embedder_health_generation()
         return EMBEDDER_AUTH_FAILED_DETAIL
 
     monkeypatch.setattr(embedder_health, "probe_embedder", slow_probe)
@@ -512,7 +513,7 @@ async def test_stale_probe_result_is_discarded_after_generation_bump(
 def test_stale_embedder_failure_cannot_replace_new_generation_health() -> None:
     """An old embedder cannot report failure after credentials reload."""
     recorder = capture_embedder_health_recorder()
-    embedder_health._reset_embedder_health_generation()
+    reset_embedder_health_generation()
     capture_embedder_health_recorder().record(None)
 
     assert not recorder.record(EMBEDDER_AUTH_FAILED_DETAIL)
@@ -522,7 +523,7 @@ def test_stale_embedder_failure_cannot_replace_new_generation_health() -> None:
 def test_stale_embedder_success_cannot_clear_new_generation_failure() -> None:
     """An old embedder cannot clear a failure from replacement credentials."""
     recorder = capture_embedder_health_recorder()
-    embedder_health._reset_embedder_health_generation()
+    reset_embedder_health_generation()
     capture_embedder_health_recorder().record(EMBEDDER_AUTH_FAILED_DETAIL)
 
     assert not recorder.record(None)
@@ -547,7 +548,7 @@ async def test_probe_captures_health_generation_before_thread_dispatch(
         return EMBEDDER_AUTH_FAILED_DETAIL
 
     async def fake_to_thread(function: object, *args: object) -> object:
-        embedder_health._reset_embedder_health_generation()
+        reset_embedder_health_generation()
         return function(*args)  # type: ignore[operator]
 
     monkeypatch.setattr(embedder_health, "probe_embedder", fake_probe)

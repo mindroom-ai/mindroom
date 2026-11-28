@@ -34,13 +34,19 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.history.run_visibility import replays_in_scope, run_in_scope
-from mindroom.history.types import HistoryScope, HistoryScopeState, owner_scope, replayed_summary_text
+from mindroom.history.types import (
+    HistoryScope,
+    HistoryScopeState,
+    history_scope_state_from_metadata,
+    owner_scope,
+    replayed_summary_text,
+    with_force_compaction,  # noqa: F401 - re-export the metadata helper
+    with_force_compaction_flag,
+)
 from mindroom.session_storage import summary_rows
-from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.store import ConversationStore, seen_event_ids, source_event_ids
+from mindroom.session_storage.store import ConversationStore, save_compaction_usage, seen_event_ids, source_event_ids
 from mindroom.session_storage.types import ConversationSession
 
 if TYPE_CHECKING:
@@ -49,10 +55,6 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelIdentity
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
-
-
-# The only field of the owner's history state, left out of the stored value at its default.
-_FORCE_COMPACTION = "force_compact_before_next_run"
 
 
 async def record_summary_usage(
@@ -91,48 +93,7 @@ def new_scope_session(*, session_id: str, scope: HistoryScope) -> ConversationSe
 
 def read_scope_state(session: ConversationSession) -> HistoryScopeState:
     """Return the compaction state of the scope owning ``session``."""
-    return _scope_state(session.metadata)
-
-
-def _scope_state(metadata: dict[str, Any] | None) -> HistoryScopeState:
-    return HistoryScopeState(force_compact_before_next_run=_history_state(metadata).get(_FORCE_COMPACTION) is True)
-
-
-def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    """Return the owner's stored history state from session ``metadata``, or an empty one."""
-    raw_value = metadata.get(MINDROOM_HISTORY_METADATA_KEY) if isinstance(metadata, dict) else None
-    return raw_value if isinstance(raw_value, dict) else {}
-
-
-# LEGACY_COMPAT: Seen ids earlier releases copied into the owner's history state.
-# Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, which layout version 7
-# fills from the older per-scope entry (``session_storage/legacy_scope_metadata.py``): the destructive compactor merged
-# compacted runs' ids into it, and team turns merged the ids each one consumed, which its stored run also holds.
-# Last legacy release: v2026.10.760; replacement: v2026.10.761, where each team turn's stored run is the only record of
-# the events it consumed.
-# Handling: Nothing reads the ids; seen ids come only from the replayable runs and the summary rows. The force flag's
-# writer keeps the field beside the flag, so a row holds it as inert data.
-# Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
-# tests/test_history_scope_state.py::test_an_edit_cut_returns_the_messages_only_the_removed_run_read, and
-# tests/test_history_scope_state.py::test_the_force_flag_is_set_and_cleared_beside_the_seen_ids.
-def _with_force_flag(metadata: dict[str, Any] | None, *, forced: bool) -> dict[str, Any]:
-    """Return session ``metadata`` with the owner's force flag set to ``forced``; ``metadata`` is left alone.
-
-    A false flag is left out, and an empty state removes the key.
-    """
-    state = {**_history_state(metadata), _FORCE_COMPACTION: forced}
-    state = {name: stored for name, stored in state.items() if stored}
-    session_metadata = dict(metadata or {})
-    if state:
-        session_metadata[MINDROOM_HISTORY_METADATA_KEY] = state
-    else:
-        session_metadata.pop(MINDROOM_HISTORY_METADATA_KEY, None)
-    return session_metadata
-
-
-def with_force_compaction(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    """Return session ``metadata`` asking its owner to compact before its next run; ``metadata`` itself is left alone."""
-    return _with_force_flag(metadata, forced=True)
+    return history_scope_state_from_metadata(session.metadata)
 
 
 def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> bool:
@@ -141,7 +102,7 @@ def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> 
     Reads only the session row's metadata, which holds the request; loading the session would also decode every
     stored run, which takes seconds on a long session.
     """
-    return _scope_state(storage.read_session_metadata(session_id)).force_compact_before_next_run
+    return history_scope_state_from_metadata(storage.read_session_metadata(session_id)).force_compact_before_next_run
 
 
 def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:
@@ -300,9 +261,9 @@ def set_force_compaction(
     """
 
     def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
-        if _scope_state(metadata).force_compact_before_next_run == forced:
+        if history_scope_state_from_metadata(metadata).force_compact_before_next_run == forced:
             return metadata
-        return _with_force_flag(metadata, forced=forced)
+        return with_force_compaction_flag(metadata, forced=forced)
 
     storage.update_metadata(session, change)
 
