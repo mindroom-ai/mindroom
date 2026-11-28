@@ -178,6 +178,7 @@ def test_wait_timeout_returns_pending_receipt(
     call_id = str(uuid4())
     now = 0.0
     polls: list[float] = []
+    paths: list[str] = []
 
     def advance(seconds: float) -> None:
         nonlocal now
@@ -189,6 +190,7 @@ def test_wait_timeout_returns_pending_receipt(
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             polls.append(now)
+            paths.append(self.path)
             self.send_response(200)
             self.end_headers()
             self.wfile.write(json.dumps({"call_id": call_id, "status": "waiting"}).encode())
@@ -206,6 +208,8 @@ def test_wait_timeout_returns_pending_receipt(
         assert json.loads(capsys.readouterr().out) == {"call_id": call_id, "status": "waiting"}
         assert polls[0] == 0
         assert all(poll < timeout for poll in polls[1:])
+        expected_first_path = f"/api/agent-cli/calls/{call_id}" + (f"?wait={timeout}" if timeout > 0 else "")
+        assert paths[0] == expected_first_path
     finally:
         server.shutdown()
         server.server_close()

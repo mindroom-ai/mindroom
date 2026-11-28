@@ -495,7 +495,7 @@ async def test_a_call_a_plugin_hook_declines_settles_failed_and_the_cli_exits_1(
         def operation(self, _payload: dict[str, object]) -> dict[str, object]:
             return receipt
 
-        def receipt(self, _call_id: str) -> dict[str, object]:
+        def receipt(self, _call_id: str, **_kwargs: object) -> dict[str, object]:
             return receipt
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
@@ -2280,7 +2280,7 @@ async def test_shorthand_call_and_explicit_retry_with_same_call_id_execute_once(
             coro = owner.operation(window="bash", operation=parse_operation(payload))
             return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=SETTLE_TIMEOUT_SECONDS)
 
-        def receipt(self, call_id: str) -> dict[str, object]:
+        def receipt(self, call_id: str, **_kwargs: object) -> dict[str, object]:
             return asyncio.run_coroutine_threadsafe(settled_receipt(owner, call_id), loop).result(
                 timeout=SETTLE_TIMEOUT_SECONDS,
             )
@@ -2349,7 +2349,7 @@ async def test_shorthand_describe_and_nonblocking_call_do_not_wait_on_running_to
             coro = owner.operation(window="bash", operation=parse_operation(payload))
             return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=SETTLE_TIMEOUT_SECONDS)
 
-        def receipt(self, call_id: str) -> dict[str, object]:
+        def receipt(self, call_id: str, **_kwargs: object) -> dict[str, object]:
             pytest.fail(f"--timeout 0 must not poll receipt {call_id}")
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", LocalClient)

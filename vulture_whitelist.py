@@ -519,3 +519,5 @@ _.register_event_source  # PluginLifecycle method called by plugins (src/mindroo
 _.revised_prompt  # Media dataclass field serialized via fields(self) (src/mindroom/llm/media.py)
 _.alt_text  # Image dataclass field serialized via fields(self) (src/mindroom/llm/media.py)
 _.poll_script_checks_once  # Public single-batch poll method exercised by direct callers and tests (src/mindroom/reactive_triggers/service.py)
+__getattr__  # PEP 562 lazy __version__ lookup (src/mindroom/__init__.py)
+__dir__  # PEP 562 module dir() listing for lazy __version__ (src/mindroom/__init__.py)
