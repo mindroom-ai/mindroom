@@ -11,7 +11,7 @@ from pydantic import BaseModel, ValidationError
 from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.calls import LiveCallProfile, RealtimeCallProfile
+from mindroom.config.calls import CascadedCallProfile, LiveCallProfile, LiveCustomVoice, RealtimeCallProfile
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.knowledge import KnowledgeRerankerConfig
 from mindroom.config.main import Config, config_validation_issues
@@ -517,3 +517,146 @@ def test_both_reranker_keys_rejected() -> None:
 
     with pytest.raises(ValidationError, match=r"'knowledge_reranker'.*'reranker'"):
         Config.model_validate({"knowledge_reranker": reranker, "reranker": reranker})
+
+
+@pytest.mark.parametrize("speed", [None, 0.25, 1, 1.0, 1.5])
+def test_realtime_and_live_call_profiles_accept_valid_speed(speed: float | None) -> None:
+    """Realtime and Live profiles accept valid numeric speeds and report their 0.25..1.5 bounds."""
+    realtime = RealtimeCallProfile(
+        backend="realtime",
+        model="gpt-realtime-2.1",
+        credentials_service="openai",
+        voice="marin",
+        speed=speed,
+    )
+    live = LiveCallProfile(
+        backend="live",
+        model="gpt-live-1.1",
+        credentials_service="openai",
+        voice="marin",
+        speed=speed,
+    )
+    expected = float(speed) if speed is not None else None
+    assert realtime.speed == expected
+    assert live.speed == expected
+    assert realtime.speaking_rate_bounds == (0.25, 1.5)
+    assert live.speaking_rate_bounds == (0.25, 1.5)
+
+
+@pytest.mark.parametrize(
+    "bad_speed",
+    [0.24, 1.51, True, False, float("nan"), float("inf"), float("-inf"), "nan", "inf"],
+)
+def test_realtime_and_live_call_profiles_reject_invalid_speed(bad_speed: object) -> None:
+    """Realtime and Live profiles reject booleans, non-finite floats, and out-of-range speeds."""
+    for model_cls, payload in (
+        (
+            RealtimeCallProfile,
+            {
+                "backend": "realtime",
+                "model": "gpt-realtime-2.1",
+                "credentials_service": "openai",
+                "voice": "marin",
+                "speed": bad_speed,
+            },
+        ),
+        (
+            LiveCallProfile,
+            {
+                "backend": "live",
+                "model": "gpt-live-1.1",
+                "credentials_service": "openai",
+                "voice": "marin",
+                "speed": bad_speed,
+            },
+        ),
+    ):
+        with pytest.raises(ValidationError):
+            model_cls.model_validate(payload)
+
+
+def test_live_call_profile_custom_voice_validation() -> None:
+    """Live profiles accept strict custom voice references alongside built-in voice names."""
+    profile = LiveCallProfile.model_validate(
+        {
+            "backend": "live",
+            "model": "gpt-live-1.1",
+            "credentials_service": "openai",
+            "voice": {"id": "  voice_custom_123  "},
+        },
+    )
+    assert profile.voice == LiveCustomVoice(id="voice_custom_123")
+    assert profile.voice.model_dump() == {"id": "voice_custom_123"}
+
+    for bad_voice in ({"id": "   "}, {"id": "voice_1", "extra": True}, {}):
+        with pytest.raises(ValidationError):
+            LiveCallProfile.model_validate(
+                {
+                    "backend": "live",
+                    "model": "gpt-live-1.1",
+                    "credentials_service": "openai",
+                    "voice": bad_voice,
+                },
+            )
+
+
+def test_cascaded_call_profile_speed_validation_and_bounds() -> None:
+    """Cascaded profiles enforce vendor bounds, reject duplicate speed config, and validate realtime TTS extra_kwargs."""
+    stt = SpeechServiceConfig(provider="openai", model="gpt-transcribe", credentials_service="openai")
+    speech_tts = SpeechServiceConfig(provider="openai", model="tts-1", credentials_service="openai")
+    realtime_tts = SpeechServiceConfig(provider="openai", model="gpt-realtime-2.1-mini", credentials_service="openai")
+
+    fast = CascadedCallProfile(backend="cascaded", stt=stt, tts=speech_tts, speed=4.0)
+    assert fast.speed == 4.0
+    assert fast.speaking_rate_bounds == (0.25, 4.0)
+
+    rt_profile = CascadedCallProfile(backend="cascaded", stt=stt, tts=realtime_tts, speed=1.5)
+    assert rt_profile.speed == 1.5
+    assert rt_profile.speaking_rate_bounds == (0.25, 1.5)
+
+    rt_extra = CascadedCallProfile(
+        backend="cascaded",
+        stt=stt,
+        tts=SpeechServiceConfig(
+            provider="openai",
+            model="gpt-realtime-2.1-mini",
+            credentials_service="openai",
+            extra_kwargs={"voice": "ash", "speed": 1.25},
+        ),
+    )
+    assert rt_extra.tts.extra_kwargs["speed"] == 1.25
+
+    with pytest.raises(ValidationError, match="not both"):
+        CascadedCallProfile(
+            backend="cascaded",
+            stt=stt,
+            tts=SpeechServiceConfig(
+                provider="openai",
+                model="tts-1",
+                credentials_service="openai",
+                extra_kwargs={"speed": 1.2},
+            ),
+            speed=1.2,
+        )
+
+    for bad_speed in (0.24, 4.01, True, False, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            CascadedCallProfile.model_validate(
+                {"backend": "cascaded", "stt": stt.model_dump(), "tts": speech_tts.model_dump(), "speed": bad_speed},
+            )
+
+    with pytest.raises(ValidationError, match="gpt-realtime TTS speed"):
+        CascadedCallProfile(backend="cascaded", stt=stt, tts=realtime_tts, speed=1.6)
+
+    for bad_extra in (0.24, 1.6, True, False, float("nan"), float("inf"), "1.2", None):
+        with pytest.raises(ValidationError, match=r"gpt-realtime TTS extra_kwargs\.speed"):
+            CascadedCallProfile(
+                backend="cascaded",
+                stt=stt,
+                tts=SpeechServiceConfig(
+                    provider="openai",
+                    model="gpt-realtime-2.1-mini",
+                    credentials_service="openai",
+                    extra_kwargs={"speed": bad_extra},
+                ),
+            )

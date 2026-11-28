@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from httpx2 import URL
+    from openai.types.realtime.realtime_audio_config_output_param import RealtimeAudioConfigOutputParam
     from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
     from openai.types.websocket_connection_options import WebSocketConnectionOptions
 
@@ -88,10 +89,18 @@ async def stream_realtime_speech(
     voice: str,
     api_key: str,
     base_url: str | None = None,
+    speed: float | None = None,
 ) -> AsyncIterator[bytes]:
     """Yield the PCM audio of ``text`` read aloud, chunk by chunk as the Realtime API sends it."""
     try:
-        async for chunk in _realtime_speech_chunks(text, model=model, voice=voice, api_key=api_key, base_url=base_url):
+        async for chunk in _realtime_speech_chunks(
+            text,
+            model=model,
+            voice=voice,
+            api_key=api_key,
+            base_url=base_url,
+            speed=speed,
+        ):
             yield chunk
     except InvalidStatus as error:
         status_code = error.response.status_code
@@ -109,6 +118,7 @@ async def _realtime_speech_chunks(
     voice: str,
     api_key: str,
     base_url: str | None,
+    speed: float | None = None,
 ) -> AsyncIterator[bytes]:
     async with AsyncOpenAI(api_key=api_key, base_url=base_url) as client:
         connection_manager = client.realtime.connect(
@@ -116,17 +126,18 @@ async def _realtime_speech_chunks(
             websocket_connection_options=_websocket_options(client.base_url),
         )
         async with connection_manager as connection:
+            output_audio: RealtimeAudioConfigOutputParam = {
+                "format": {"type": "audio/pcm", "rate": REALTIME_SPEECH_SAMPLE_RATE},
+                "voice": voice,
+            }
+            if speed is not None:
+                output_audio["speed"] = speed
             await connection.session.update(
                 session={
                     "type": "realtime",
                     "output_modalities": ["audio"],
                     "instructions": _READER_INSTRUCTIONS,
-                    "audio": {
-                        "output": {
-                            "format": {"type": "audio/pcm", "rate": REALTIME_SPEECH_SAMPLE_RATE},
-                            "voice": voice,
-                        },
-                    },
+                    "audio": {"output": output_audio},
                 },
             )
             await connection.response.create(
@@ -175,11 +186,19 @@ async def synthesize_realtime_speech(
     voice: str,
     api_key: str,
     base_url: str | None = None,
+    speed: float | None = None,
 ) -> bytes:
     """Return the PCM audio of ``text`` read aloud through the Realtime API."""
     chunks = [
         chunk
-        async for chunk in stream_realtime_speech(text, model=model, voice=voice, api_key=api_key, base_url=base_url)
+        async for chunk in stream_realtime_speech(
+            text,
+            model=model,
+            voice=voice,
+            api_key=api_key,
+            base_url=base_url,
+            speed=speed,
+        )
     ]
     return b"".join(chunks)
 

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -134,6 +134,10 @@ class FakeLiveBridge:
     def set_frame_key(self, participant_identity: str, key: bytes, key_index: int) -> None:
         """Record the frame key."""
         self.calls.append(("key", participant_identity, key, key_index))
+
+    def set_speaking_rate(self, rate: float) -> None:
+        """Record a speaking-rate adjustment."""
+        self.calls.append(("speed", rate))
 
     async def start_agent(self, options: LiveVoiceAgentOptions) -> None:
         """Keep the options the child built, then hang if configured to."""
@@ -912,3 +916,26 @@ def test_warm_audio_process_hands_over_the_idle_child_when_its_replacement_fails
     assert child is spawned[0]
     # The failed spawn's socketpair is closed, not leaked.
     assert [sock.fileno() for sock in failed_sockets] == [-1]
+
+
+@pytest.mark.asyncio
+async def test_proxy_forwards_speed_custom_voice_and_mid_call_set_speaking_rate() -> None:
+    """ProcessLiveVoiceBridge forwards startup speed, custom voice dicts, and SetSpeakingRate to the child."""
+    async with proxy_bridge() as (bridge, bridges, _children):
+        await bridge.connect(SfuGrant(url="wss://sfu.example.org", jwt="token"))
+        await bridge.start_agent(
+            LiveVoiceAgentOptions(
+                get_instructions=AsyncMock(return_value="Be brief."),
+                model="gpt-live-1.1",
+                api_key="sk-test",
+                voice={"id": "voice_custom_99"},
+                speed=1.2,
+                respond=AsyncMock(return_value=CallAgentResponse("Done.")),
+            ),
+        )
+        assert bridges[0].options is not None
+        assert bridges[0].options.voice == {"id": "voice_custom_99"}
+        assert bridges[0].options.speed == 1.2
+
+        bridge.set_speaking_rate(0.85)
+        await _until(lambda: ("speed", 0.85) in bridges[0].calls)

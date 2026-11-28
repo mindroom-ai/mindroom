@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -37,6 +38,7 @@ from mindroom.background_tasks import (
     run_coroutine_until_complete,
     wait_for_future_until_complete,
 )
+from mindroom.config.calls import REALTIME_SPEAKING_RATE_BOUNDS
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.delegation.state import DelegationExecutor
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
@@ -67,7 +69,13 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import ToolGate, close_toolkits, connect_toolkits
+from mindroom.tool_system.tool_function import (
+    AdaptedToolkit,
+    ToolFunction,
+    ToolGate,
+    close_toolkits,
+    connect_toolkits,
+)
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -90,7 +98,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolkitClose
+    from mindroom.tool_system.tool_function import ToolkitClose
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -106,6 +114,72 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 _MAX_TOOL_RESULT_CHARS = 8000
 _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
 _ROOM_INSTRUCTIONS_TIMEOUT_SECONDS = 5.0
+_SET_SPEAKING_RATE_TOOL_NAME = "set_speaking_rate"
+
+
+def _speaking_rate_tool_function(
+    set_speaking_rate: Callable[[float], None],
+    speaking_rate_bounds: tuple[float, float],
+    initial_speaking_rate: float = 1.0,
+) -> ToolFunction:
+    """Build the ephemeral call-only tool for adjusting speaking rate mid-call."""
+    min_rate, max_rate = speaking_rate_bounds
+
+    async def _set_speaking_rate(rate: object = None) -> str:
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate):
+            return f"Invalid speaking rate: expected a finite number between {min_rate:g} and {max_rate:g}."
+        numeric_rate = float(rate)
+        if not (min_rate <= numeric_rate <= max_rate):
+            return f"Invalid speaking rate {numeric_rate:g}: expected a number between {min_rate:g} and {max_rate:g}."
+        set_speaking_rate(numeric_rate)
+        return f"Speaking rate set to {numeric_rate:g}x."
+
+    return ToolFunction(
+        name=_SET_SPEAKING_RATE_TOOL_NAME,
+        description=f"Set voice call speaking rate (started at {initial_speaking_rate:g}x).",
+        parameters={
+            "type": "object",
+            "properties": {
+                "rate": {
+                    "type": "number",
+                    "minimum": min_rate,
+                    "maximum": max_rate,
+                    "description": f"Multiplier from {min_rate:g} (slower) to {max_rate:g} (faster); 1.0 is normal.",
+                },
+            },
+            "required": ["rate"],
+            "additionalProperties": False,
+        },
+        offer_background_after=False,
+        offer_output_path=False,
+        entrypoint=_set_speaking_rate,
+    )
+
+
+def _speaking_rate_toolkit(
+    set_speaking_rate: Callable[[float], None] | None,
+    speaking_rate_bounds: tuple[float, float],
+    initial_speaking_rate: float = 1.0,
+) -> AdaptedToolkit | None:
+    if set_speaking_rate is None:
+        return None
+    return AdaptedToolkit(
+        name="voice_call_controls",
+        functions=(_speaking_rate_tool_function(set_speaking_rate, speaking_rate_bounds, initial_speaking_rate),),
+        instructions=None,
+    )
+
+
+def _append_call_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
+    """Attach a call-only toolkit unless a configured tool already owns one of its names."""
+    existing = set(build.spec.functions)
+    functions = tuple(function for function in toolkit.functions if function.name not in existing)
+    if not functions:
+        return build
+    return replace(
+        build,
+        spec=replace(build.spec, toolkits=(*build.spec.toolkits, replace(toolkit, functions=functions))),
+    )
 
 
 async def _save_call_usage(
@@ -381,6 +455,7 @@ class _CallAgentCache:
     context: ToolRuntimeContext
     active_model_name: str | None
     instructions_room_id: str | None = None
+    extra_toolkits: tuple[AdaptedToolkit, ...] = ()
     build: AgentBuild | None = None
     knowledge_identity: tuple[int, ...] = ()
     refresh_scheduler: KnowledgeRefreshScheduler | None = None
@@ -483,6 +558,8 @@ class _CallAgentCache:
                 run_direct_child=run_delegated_child_response,
             ),
         )
+        for toolkit in self.extra_toolkits:
+            build = _append_call_toolkit(build, toolkit)
         return _refuse_text_chat_functions(
             _spoken(build),
             self.config,
@@ -507,6 +584,9 @@ async def build_call_tools(
     active_model_name: str | None = None,
     origin_brief: Callable[[TokenCounter], str] | None = None,
     instructions_room_id: str | None = None,
+    set_speaking_rate: Callable[[float], None] | None = None,
+    speaking_rate_bounds: tuple[float, float] = REALTIME_SPEAKING_RATE_BOUNDS,
+    initial_speaking_rate: float = 1.0,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend.
 
@@ -550,6 +630,11 @@ async def build_call_tools(
     )
     execution_identity = context.execution_identity
     resolved_instructions_room_id = instructions_room_id or room_id
+    speaking_rate_toolkit = _speaking_rate_toolkit(
+        set_speaking_rate,
+        speaking_rate_bounds,
+        initial_speaking_rate,
+    )
     if enable_responder:
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
@@ -583,6 +668,7 @@ async def build_call_tools(
             context=context,
             active_model_name=active_model_name,
             instructions_room_id=resolved_instructions_room_id,
+            extra_toolkits=(speaking_rate_toolkit,) if speaking_rate_toolkit is not None else (),
         )
         responder = functools.partial(
             _run_call_agent,
@@ -653,6 +739,8 @@ async def build_call_tools(
             ),
         ),
     )
+    if speaking_rate_toolkit is not None:
+        build = _append_call_toolkit(build, speaking_rate_toolkit)
     # Paid helper tools, such as claude_agent, record their usage in the call's ledger for the caller.
     usage_owner = _call_usage_owner(
         agent_name,
